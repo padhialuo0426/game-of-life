@@ -1,0 +1,37 @@
+#ifndef GAME_OF_LIFE_SETTINGS_H
+#define GAME_OF_LIFE_SETTINGS_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+/* Persistent user settings, stored as JSON in the config directory. These are
+   the parameters remembered across runs (board size, world type, etc.). */
+typedef struct {
+    int width;
+    int height;
+    bool wrap;      /* true = toroidal world, false = finite world */
+    int delay_ms;
+    double density; /* initial random density when no pattern is loaded */
+} Settings;
+
+/* Fill `s` with the built-in defaults. */
+void settings_defaults(Settings *s);
+
+/* Write the config directory path ($XDG_CONFIG_HOME or ~/.config, plus
+   "/game-of-life") into `buf`. Returns false if neither env var is set. */
+bool settings_config_dir(char *buf, size_t cap);
+
+/* Write the full path to settings.json into `buf`. Returns false if the config
+   directory cannot be determined. */
+bool settings_file_path(char *buf, size_t cap);
+
+/* Load settings.json, overwriting the fields of `s` that are present in the
+   file. Returns true if the file was read, false if it is missing/unreadable
+   (in which case `s` is left unchanged). */
+bool settings_load(Settings *s);
+
+/* Write `s` to settings.json, creating the config directory if needed.
+   Returns true on success. */
+bool settings_save(const Settings *s);
+
+#endif /* GAME_OF_LIFE_SETTINGS_H */

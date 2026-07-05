@@ -1,0 +1,72 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(game-of-life
+    VERSION 1.0.0
+    DESCRIPTION "Conway's Game of Life terminal program"
+    LANGUAGES C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+# Default to Debug if no build type is specified (single-config generators).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
+
+# Install to the user's home by default (~/.local) so `make install` needs no
+# root. Override with -DCMAKE_INSTALL_PREFIX=... for a system-wide install.
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "$ENV{HOME}/.local"
+        CACHE PATH "Install prefix (default: user-local)" FORCE)
+endif()
+
+add_executable(game-of-life
+    src/main.c
+    src/board.c
+    src/config.c
+    src/settings.c
+    src/terminal.c)
+
+target_include_directories(game-of-life PRIVATE src)
+
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(game-of-life PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<CONFIG:Debug>:-g -O0>
+        $<$<CONFIG:Release>:-O2 -DNDEBUG>)
+endif()
+
+# --- Installation -----------------------------------------------------------
+include(GNUInstallDirs)
+
+# The executable goes to <prefix>/bin (i.e. ~/.local/bin by default).
+install(TARGETS game-of-life RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# Install the default pattern to the XDG config location, which is where the
+# program looks when run without -f. Evaluated at install time so it respects
+# the invoking user's HOME / XDG_CONFIG_HOME, and it never clobbers an existing
+# config the user may have customised.
+install(CODE "
+    set(cfg_home \"\$ENV{XDG_CONFIG_HOME}\")
+    if(cfg_home STREQUAL \"\")
+        set(cfg_home \"\$ENV{HOME}/.config\")
+    endif()
+    set(dest \"\${cfg_home}/game-of-life/glider.cells\")
+    if(EXISTS \"\${dest}\")
+        message(STATUS \"Keeping existing default config: \${dest}\")
+    else()
+        file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/patterns/glider.cells\"
+             DESTINATION \"\${cfg_home}/game-of-life\")
+        message(STATUS \"Installed default config: \${dest}\")
+    endif()
+")
+
+# --- Uninstall (removes the executable and the default config) --------------
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_uninstall.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake"
+    @ONLY)
+add_custom_target(uninstall
+    COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake"
+    COMMENT "Uninstalling game-of-life and its default config")

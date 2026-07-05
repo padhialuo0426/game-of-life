@@ -1,0 +1,40 @@
+# Uninstall script for game-of-life.
+# Run via the `uninstall` target (e.g. `make uninstall`).
+# @VAR@ tokens are substituted at configure time; ${...} / $ENV{...} are left
+# literal and evaluated when this script runs.
+
+# --- Executable -------------------------------------------------------------
+set(exe "@CMAKE_INSTALL_FULL_BINDIR@/game-of-life")
+if(EXISTS "${exe}")
+    message(STATUS "Removing ${exe}")
+    file(REMOVE "${exe}")
+else()
+    message(STATUS "Not found (skipped): ${exe}")
+endif()
+
+# --- Default config (respects HOME / XDG_CONFIG_HOME at run time) -----------
+set(cfg_home "$ENV{XDG_CONFIG_HOME}")
+if(cfg_home STREQUAL "")
+    set(cfg_home "$ENV{HOME}/.config")
+endif()
+set(cfg_dir "${cfg_home}/game-of-life")
+
+# Remove the default pattern and the runtime settings file.
+foreach(name "glider.cells" "settings.json")
+    set(cfg "${cfg_dir}/${name}")
+    if(EXISTS "${cfg}")
+        message(STATUS "Removing ${cfg}")
+        file(REMOVE "${cfg}")
+    else()
+        message(STATUS "Not found (skipped): ${cfg}")
+    endif()
+endforeach()
+
+# Remove the config directory only if it is now empty.
+if(EXISTS "${cfg_dir}")
+    file(GLOB remaining "${cfg_dir}/*")
+    if(remaining STREQUAL "")
+        message(STATUS "Removing empty directory ${cfg_dir}")
+        file(REMOVE_RECURSE "${cfg_dir}")
+    endif()
+endif()
