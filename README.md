@@ -193,12 +193,15 @@ $XDG_CONFIG_HOME/game-of-life/settings.json
 ~/.config/game-of-life/settings.json
 ```
 
-- On first run (when no settings file can be read) the file is created with the
-  effective settings.
-- When you apply changes in **Canvas** mode, the new board size and world type
-  are written back, so the next run starts the same way — no need to reconfigure
-  each time.
-- Command-line options override the stored values for that run.
+- The effective settings — board size, world type, delay and density — are
+  written to this file on **every** run (creating it on the first run), so a
+  configuration always carries over to the next run.
+- Applying changes in **Canvas** mode writes the new board size and world type
+  back immediately (as does shrinking the board to fit a resized terminal).
+- Command-line options that map to a stored setting (size, world type, delay,
+  density) are applied for the run **and** persisted, so an option you pass
+  (e.g. `-w 50`) becomes the remembered value next time. `-s`/`-f` are not
+  stored.
 
 Example `settings.json`:
 
