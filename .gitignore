@@ -1,3 +1,4 @@
 /build/
 .vscode/s
 .idea/
+.DS_Store
