@@ -130,6 +130,27 @@ running, the board adapts — it shrinks to fit a smaller window (it is not forc
 to grow when the window gets larger). A very large `-w`/`-h` is simply clamped to
 what the terminal can show.
 
+### Sixel graphics (much larger boards)
+
+If your terminal supports **sixel** graphics (Konsole, foot, WezTerm, xterm
+`-ti vt340`, mlterm, recent Windows Terminal, …), the board is drawn as a real
+bitmap instead of text cells. Each cell becomes a block of pixels, so the board
+is limited by the terminal's **pixels**, not by its character grid — that is
+roughly an 8× jump in how many cells fit on screen, and it lets the world grow to
+hundreds of cells across. The image auto-scales (zoom-to-fit): small boards get
+chunky cells, large boards get one-pixel cells.
+
+Sixel is detected automatically at startup (a Device Attributes query). To force
+it, set an environment variable:
+
+```sh
+GOL_SIXEL=1 game-of-life   # force sixel on
+GOL_SIXEL=0 game-of-life   # force the plain text renderer
+```
+
+If the terminal cannot report its pixel size, or does not support sixel, the
+program falls back to the text grid automatically.
+
 ### World type: finite vs toroidal
 
 - **Finite** (default) — cells beyond the border are dead. Patterns that travel

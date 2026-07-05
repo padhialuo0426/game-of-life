@@ -118,6 +118,23 @@ cmake --build build/release --target uninstall
 窗口变小时收缩以适配（窗口变大时不会强制变大）。过大的 `-w`/`-h` 会被直接钳制到
 终端能显示的范围。
 
+### Sixel 真像素图形（更大的画布）
+
+如果你的终端支持 **Sixel** 图形（Konsole、foot、WezTerm、xterm `-ti vt340`、
+mlterm、较新的 Windows Terminal 等），棋盘会以**真实位图**绘制,而不再是文本字符。
+每个细胞变成一块像素,于是画布受限于终端的**像素数**,而不是字符网格——一屏能容纳的
+细胞数大约提升 8 倍,世界可以做到几百格宽。图像会自动缩放(zoom-to-fit):画布小的时候
+细胞是大方块,画布大的时候细胞缩到一个像素。
+
+启动时会自动探测 Sixel(通过 Device Attributes 查询)。也可以用环境变量强制:
+
+```sh
+GOL_SIXEL=1 game-of-life   # 强制开启 Sixel
+GOL_SIXEL=0 game-of-life   # 强制使用纯文本渲染
+```
+
+如果终端无法报告像素尺寸,或不支持 Sixel,程序会自动回退到文本网格。
+
 ### 世界类型：有限 vs 环面
 
 - **有限（默认）** —— 边界之外一律视为死细胞。飞出边缘的图案撞墙后消失

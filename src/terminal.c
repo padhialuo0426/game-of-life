@@ -4,6 +4,8 @@
 
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -110,4 +112,63 @@ bool terminal_size(int *cols, int *rows) {
     *cols = ws.ws_col;
     *rows = ws.ws_row;
     return true;
+}
+
+bool terminal_pixel_size(int *xpx, int *ypx) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0) {
+        return false;
+    }
+    if (ws.ws_xpixel == 0 || ws.ws_ypixel == 0) {
+        return false; /* terminal does not report a pixel size */
+    }
+    *xpx = ws.ws_xpixel;
+    *ypx = ws.ws_ypixel;
+    return true;
+}
+
+/* Return true if `resp` (a Primary DA reply like "\033[?62;4;9c") advertises
+   attribute 4 (sixel). Scans the ';'-separated numeric tokens for an exact 4. */
+static bool da_has_sixel(const char *resp) {
+    const char *p = resp;
+    while (*p != '\0') {
+        if (*p >= '0' && *p <= '9') {
+            long v = strtol(p, (char **)&p, 10);
+            if (v == 4) return true;
+        } else {
+            p++;
+        }
+    }
+    return false;
+}
+
+bool terminal_query_sixel(void) {
+    const char *env = getenv("GOL_SIXEL");
+    if (env != NULL) {
+        if (env[0] == '0') return false;
+        if (env[0] == '1') return true;
+    }
+
+    /* Ask the terminal for its Primary Device Attributes and read the reply. */
+    if (write(STDOUT_FILENO, "\033[c", 3) != 3) {
+        return false;
+    }
+    char buf[64];
+    size_t n = 0;
+    while (n < sizeof(buf) - 1) {
+        struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
+        if (poll(&pfd, 1, 200) <= 0) {
+            break; /* no (more) response in time */
+        }
+        char c;
+        if (read(STDIN_FILENO, &c, 1) != 1) {
+            break;
+        }
+        buf[n++] = c;
+        if (c == 'c') {
+            break; /* end of the DA reply */
+        }
+    }
+    buf[n] = '\0';
+    return da_has_sixel(buf);
 }

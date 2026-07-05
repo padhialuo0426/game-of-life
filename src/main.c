@@ -3,6 +3,7 @@
 #include "board.h"
 #include "config.h"
 #include "settings.h"
+#include "sixel.h"
 #include "terminal.h"
 
 #include <signal.h>
@@ -41,6 +42,12 @@
 #define BLINK_MS 400
 #define MAX_DELAY_MS 3600000 /* 1 hour; keeps the poll timeout within int */
 
+/* Sixel (real-pixel) rendering. When the terminal supports sixel graphics the
+   board is drawn as a bitmap instead of text cells, so its size is limited by
+   pixels rather than by the character grid. */
+#define SIXEL_UI_ROWS 6   /* char rows reserved below the image for the UI */
+#define SIXEL_CELL_MAX 20 /* max pixels per cell (keeps small boards sane) */
+
 /* Top-level interaction mode. */
 typedef enum { UI_NORMAL, UI_EDIT, UI_CANVAS } UiMode;
 
@@ -71,6 +78,9 @@ typedef struct {
     bool pending_wrap;          /* target topology (UI_CANVAS) */
     bool wrap;                  /* current topology: true=toroidal, false=finite */
     int max_w, max_h;           /* largest board that fits the terminal now */
+
+    bool sixel;                 /* draw the board as a sixel bitmap */
+    int sx_last_w, sx_last_h;   /* last sixel image pixel size (clear on change) */
 
     long delay_ms;
     bool running;
@@ -219,7 +229,61 @@ static void appendf(char *buf, size_t cap, size_t *n, const char *fmt, ...) {
     }
 }
 
-static void render(const App *app) {
+/* Append the controls block shared by both renderers: status line, a blank
+   line, the button bar, a blank line, and the hint line. Occupies five text
+   rows (plus the caller's clear-below). */
+static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
+    const Board *board = app->cur;
+
+    switch (app->mode) {
+        case UI_EDIT:
+            appendf(buf, cap, n, " EDIT   Cursor: (%d,%d)   Size: %dx%d" EOL EOL,
+                    app->cursor_x, app->cursor_y, board->width, board->height);
+            break;
+        case UI_CANVAS:
+            appendf(buf, cap, n,
+                    " CANVAS   New: %d x %d   World: %s   (current %dx%d %s)" EOL EOL,
+                    app->pending_w, app->pending_h, topo_label(app->pending_wrap),
+                    board->width, board->height, topo_label(app->wrap));
+            break;
+        default:
+            appendf(buf, cap, n, " State: %s   Gen: %ld   Size: %dx%d   World: %s" EOL EOL,
+                    sim_label(app->sim), app->gen, board->width, board->height,
+                    topo_label(app->wrap));
+            break;
+    }
+
+    /* Button bar; selection is highlighted only in normal mode. */
+    appendf(buf, cap, n, " ");
+    for (int b = 0; b < BTN_COUNT; b++) {
+        if (app->mode == UI_NORMAL && b == app->selected) {
+            appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, BUTTON_LABELS[b]);
+        } else {
+            appendf(buf, cap, n, "[%s]", BUTTON_LABELS[b]);
+        }
+        appendf(buf, cap, n, " ");
+    }
+    appendf(buf, cap, n, EOL EOL);
+
+    switch (app->mode) {
+        case UI_EDIT:
+            appendf(buf, cap, n,
+                    " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" EOL);
+            break;
+        case UI_CANVAS:
+            appendf(buf, cap, n,
+                    " Left/Right width   Up/Down height   Space world   Enter apply   Esc cancel" EOL);
+            break;
+        default:
+            appendf(buf, cap, n,
+                    " Tab/Left/Right select   Space/Enter activate   q quit" EOL);
+            break;
+    }
+}
+
+/* Text renderer: a box-drawing grid with two columns per cell. Used when sixel
+   is unavailable. */
+static void render_chars(const App *app) {
     const Board *board = app->cur;
     const int inner = board->width * 2; /* two columns per cell => square look */
     size_t cap = (size_t)board->width * board->height * 12 +
@@ -258,52 +322,7 @@ static void render(const App *app) {
     for (int i = 0; i < inner; i++) appendf(buf, cap, &n, "─");
     appendf(buf, cap, &n, "┘" EOL);
 
-    /* Status line (mode-dependent). */
-    switch (app->mode) {
-        case UI_EDIT:
-            appendf(buf, cap, &n, " EDIT   Cursor: (%d,%d)   Size: %dx%d" EOL EOL,
-                    app->cursor_x, app->cursor_y, board->width, board->height);
-            break;
-        case UI_CANVAS:
-            appendf(buf, cap, &n,
-                    " CANVAS   New: %d x %d   World: %s   (current %dx%d %s)" EOL EOL,
-                    app->pending_w, app->pending_h, topo_label(app->pending_wrap),
-                    board->width, board->height, topo_label(app->wrap));
-            break;
-        default:
-            appendf(buf, cap, &n, " State: %s   Gen: %ld   Size: %dx%d   World: %s" EOL EOL,
-                    sim_label(app->sim), app->gen, board->width, board->height,
-                    topo_label(app->wrap));
-            break;
-    }
-
-    /* Button bar; selection is highlighted only in normal mode. */
-    appendf(buf, cap, &n, " ");
-    for (int b = 0; b < BTN_COUNT; b++) {
-        if (app->mode == UI_NORMAL && b == app->selected) {
-            appendf(buf, cap, &n, ANSI_REVERSE "[%s]" ANSI_RESET, BUTTON_LABELS[b]);
-        } else {
-            appendf(buf, cap, &n, "[%s]", BUTTON_LABELS[b]);
-        }
-        appendf(buf, cap, &n, " ");
-    }
-    appendf(buf, cap, &n, EOL EOL);
-
-    /* Hint line (mode-dependent). */
-    switch (app->mode) {
-        case UI_EDIT:
-            appendf(buf, cap, &n,
-                    " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" EOL);
-            break;
-        case UI_CANVAS:
-            appendf(buf, cap, &n,
-                    " Left/Right width   Up/Down height   Space world   Enter apply   Esc cancel" EOL);
-            break;
-        default:
-            appendf(buf, cap, &n,
-                    " Tab/Left/Right select   Space/Enter activate   q quit" EOL);
-            break;
-    }
+    append_controls(app, buf, cap, &n);
 
     /* Erase anything left below (e.g. rows from a previously taller board). */
     appendf(buf, cap, &n, ANSI_CLR_BELOW);
@@ -311,6 +330,74 @@ static void render(const App *app) {
     fwrite(buf, 1, n, stdout);
     fflush(stdout);
     free(buf);
+}
+
+/* Sixel renderer: draw the board as a bitmap (one cell = cell_px pixels, chosen
+   to fill the available space), then the text controls below it. Returns false
+   if the layout cannot be computed (no pixel size, board too tall, etc.), so
+   the caller can fall back to the text renderer. */
+static bool render_sixel(App *app) {
+    const Board *board = app->cur;
+
+    int cols, rows, xpx, ypx;
+    if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
+        return false;
+    }
+    const int cch = ypx / rows; /* pixel height of one character cell */
+    const int ccw = xpx / cols; /* pixel width  of one character cell */
+    if (cch <= 0 || ccw <= 0) return false;
+
+    const int avail_w = xpx - ccw;                 /* ~1 column right margin */
+    const int avail_h = ypx - SIXEL_UI_ROWS * cch; /* rows reserved for the UI */
+    if (avail_w < board->width || avail_h < board->height) {
+        return false; /* cannot fit even one pixel per cell */
+    }
+
+    /* Zoom to fit: largest square cell that fits both dimensions. */
+    int cell = avail_w / board->width;
+    int ch = avail_h / board->height;
+    if (ch < cell) cell = ch;
+    if (cell < 1) cell = 1;
+    if (cell > SIXEL_CELL_MAX) cell = SIXEL_CELL_MAX;
+
+    const int img_w = board->width * cell;
+    const int img_h = board->height * cell;
+    const int img_rows = (img_h + cch - 1) / cch; /* char rows the image spans */
+
+    const int cx = (app->mode == UI_EDIT) ? app->cursor_x : -1;
+    const int cy = (app->mode == UI_EDIT) ? app->cursor_y : -1;
+    const bool con = (app->mode == UI_EDIT) && app->blink_on;
+
+    size_t img_len = 0;
+    char *img = sixel_render_board(board, cell, cx, cy, con, &img_len);
+    if (img == NULL) return false;
+
+    /* Header: clear the screen only when the image size changed (avoids leaving
+       stale pixels around a now-smaller image without flickering every frame). */
+    if (img_w != app->sx_last_w || img_h != app->sx_last_h) {
+        fputs(ANSI_CLEAR, stdout);
+        app->sx_last_w = img_w;
+        app->sx_last_h = img_h;
+    }
+    fputs(ANSI_HOME, stdout);
+    fwrite(img, 1, img_len, stdout);
+    free(img);
+
+    /* Controls, positioned just below the image. */
+    char ctl[2048];
+    size_t n = 0;
+    appendf(ctl, sizeof(ctl), &n, "\033[%d;1H", img_rows + 1);
+    append_controls(app, ctl, sizeof(ctl), &n);
+    appendf(ctl, sizeof(ctl), &n, ANSI_CLR_BELOW);
+    fwrite(ctl, 1, n, stdout);
+
+    fflush(stdout);
+    return true;
+}
+
+static void render(App *app) {
+    if (app->sixel && render_sixel(app)) return;
+    render_chars(app);
 }
 
 /* ------------------------------------------------------------------ */
@@ -557,9 +644,22 @@ static int clamp_dim(int v, int lo, int hi) {
 }
 
 /* Compute the largest board (cells) that fits the current terminal, bounded by
-   the absolute safety caps. Falls back to the caps if the size is unavailable
-   (e.g. not a terminal). */
-static void fit_limits(int *max_w, int *max_h) {
+   the absolute safety caps. In sixel mode the limit is the pixel budget (down
+   to one pixel per cell); otherwise it is the character grid. Falls back to the
+   caps if the size is unavailable (e.g. not a terminal). */
+static void fit_limits(bool sixel, int *max_w, int *max_h) {
+    if (sixel) {
+        int cols, rows, xpx, ypx;
+        if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
+            int cch = ypx / rows, ccw = xpx / cols;
+            if (cch > 0 && ccw > 0) {
+                *max_w = clamp_dim(xpx - ccw, MIN_DIM, HARD_MAX_W);
+                *max_h = clamp_dim(ypx - SIXEL_UI_ROWS * cch, MIN_DIM, HARD_MAX_H);
+                return;
+            }
+        }
+        /* Pixel size unavailable: fall through to the character-grid formula. */
+    }
     int cols, rows;
     if (terminal_size(&cols, &rows)) {
         *max_w = clamp_dim((cols - GRID_H_OVERHEAD) / 2, MIN_DIM, HARD_MAX_W);
@@ -573,7 +673,7 @@ static void fit_limits(int *max_w, int *max_h) {
 /* React to a terminal resize: recompute the fit limits and, if the board no
    longer fits, shrink it to fit (keeping pending canvas values in bounds). */
 static void handle_winch(App *app) {
-    fit_limits(&app->max_w, &app->max_h);
+    fit_limits(app->sixel, &app->max_w, &app->max_h);
 
     int nw = app->cur->width  > app->max_w ? app->max_w : app->cur->width;
     int nh = app->cur->height > app->max_h ? app->max_h : app->cur->height;
@@ -608,11 +708,20 @@ int main(int argc, char **argv) {
         return pr > 0 ? 0 : 1;
     }
 
+    /* Enter raw mode up front: it is needed both for reading input and for
+       querying the terminal (sixel support) before we size the board. */
+    if (!terminal_init()) {
+        fprintf(stderr, "This program requires an interactive terminal.\n");
+        return 1;
+    }
+    atexit(terminal_restore);
+    bool sixel = terminal_query_sixel();
+
     /* Clamp the board to what fits the terminal now, fold the effective
        (CLI-overridden) parameters back into settings, and on first run create
        the settings file so it exists for next time. */
     int max_w, max_h;
-    fit_limits(&max_w, &max_h);
+    fit_limits(sixel, &max_w, &max_h);
     settings.width = clamp_dim(opt.width, MIN_DIM, max_w);
     settings.height = clamp_dim(opt.height, MIN_DIM, max_h);
     settings.wrap = opt.wrap;
@@ -641,6 +750,7 @@ int main(int argc, char **argv) {
     app.pending_wrap = opt.wrap;
     app.max_w = max_w;
     app.max_h = max_h;
+    app.sixel = sixel;
     app.settings = &settings;
 
     if (!board_init(&app.initial, opt.width, opt.height) ||
@@ -652,11 +762,6 @@ int main(int argc, char **argv) {
     app.cur = &app.a;
     app.next = &app.b;
 
-    if (!terminal_init()) {
-        fprintf(stderr, "This program requires an interactive terminal.\n");
-        return 1;
-    }
-    atexit(terminal_restore);
     /* Restore the terminal on termination, and refit on window resize. No
        SA_RESTART on SIGWINCH so it interrupts poll() and wakes the loop. */
     struct sigaction sa_term = {0};

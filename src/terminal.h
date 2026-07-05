@@ -36,4 +36,17 @@ Key terminal_read_key(int timeout_ms);
    available (e.g. output is not a terminal). */
 bool terminal_size(int *cols, int *rows);
 
+/* Query the terminal window size in pixels (ws_xpixel/ws_ypixel). Needed to
+   place and scale sixel graphics. On success writes the pixel width/height and
+   returns true; returns false if the terminal does not report a pixel size
+   (many do not) or the values are zero. */
+bool terminal_pixel_size(int *xpx, int *ypx);
+
+/* Detect whether the terminal understands sixel graphics. Sends a Primary
+   Device Attributes query and looks for attribute 4 in the reply, with a short
+   timeout. Must be called while in raw mode (after terminal_init) so the reply
+   is not echoed or line-buffered. The environment variable GOL_SIXEL overrides
+   detection: "0" forces off, "1" forces on (no query is sent). */
+bool terminal_query_sixel(void);
+
 #endif /* GAME_OF_LIFE_TERMINAL_H */
