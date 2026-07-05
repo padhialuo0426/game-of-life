@@ -140,8 +140,10 @@ static bool da_has_sixel(const char *resp) {
     const char *p = resp;
     while (*p != '\0') {
         if (*p >= '0' && *p <= '9') {
-            long v = strtol(p, (char **)&p, 10);
+            char *end = NULL;
+            long v = strtol(p, &end, 10);
             if (v == 4) return true;
+            p = end; /* advance past the number we just consumed */
         } else {
             p++;
         }
@@ -152,8 +154,9 @@ static bool da_has_sixel(const char *resp) {
 bool terminal_query_sixel(void) {
     const char *env = getenv("GOL_SIXEL");
     if (env != NULL) {
-        if (env[0] == '0') return false;
-        if (env[0] == '1') return true;
+        if (strcmp(env, "0") == 0) return false;
+        if (strcmp(env, "1") == 0) return true;
+        /* Any other value falls through to live detection. */
     }
 
     /* Ask the terminal for its Primary Device Attributes and read the reply. */

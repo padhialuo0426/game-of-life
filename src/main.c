@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 /* ANSI escape helpers. */
 #define ANSI_CLEAR       "\033[2J"
@@ -136,8 +137,12 @@ static void on_winch(int sig) {
     g_resized = 1;
 }
 
-/* Restore the terminal and exit on a terminating signal. */
+/* Restore the terminal and exit on a terminating signal. Re-show the cursor
+   too (terminal_restore only touches termios), so a kill does not leave the
+   user's terminal with an invisible cursor. write() is async-signal-safe. */
 static void on_term(int sig) {
+    ssize_t r = write(STDOUT_FILENO, ANSI_SHOW_CURSOR, sizeof(ANSI_SHOW_CURSOR) - 1);
+    (void)r;
     terminal_restore();
     _Exit(128 + sig);
 }
@@ -1003,7 +1008,7 @@ int main(int argc, char **argv) {
        let command-line options override for this run. */
     Settings settings;
     settings_defaults(&settings);
-    bool settings_existed = settings_load(&settings);
+    settings_load(&settings);
     settings.width = clamp_dim(settings.width, MIN_DIM, HARD_MAX_W);
     settings.height = clamp_dim(settings.height, MIN_DIM, HARD_MAX_H);
 
@@ -1028,9 +1033,8 @@ int main(int argc, char **argv) {
     atexit(terminal_restore);
     bool sixel = terminal_query_sixel();
 
-    /* Clamp the board to what fits the terminal now, fold the effective
-       (CLI-overridden) parameters back into settings, and on first run create
-       the settings file so it exists for next time. */
+    /* Clamp the board to what fits the terminal now and fold the effective
+       (CLI-overridden) parameters back into settings. */
     int max_w, max_h;
     fit_limits(sixel, &max_w, &max_h);
     settings.width = clamp_dim(opt.width, MIN_DIM, max_w);
@@ -1041,9 +1045,11 @@ int main(int argc, char **argv) {
     settings.density = opt.density;
     opt.width = settings.width;
     opt.height = settings.height;
-    if (!settings_existed) {
-        settings_save(&settings); /* best effort */
-    }
+    /* Persist the effective settings so every remembered parameter — size,
+       world type, delay and density — carries over to the next run, whether it
+       came from the file or was overridden on the command line. This also
+       creates the file on first run. */
+    settings_save(&settings); /* best effort */
 
     srand(opt.seed_set ? opt.seed : (unsigned int)time(NULL));
 
