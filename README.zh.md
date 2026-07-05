@@ -23,7 +23,7 @@ cmake --build --preset release
 默认安装到用户主目录（无需 root）：
 
 - 可执行文件 → `~/.local/bin/game-of-life`
-- 默认图案 → `~/.config/game-of-life/glider.cells`
+- 默认图案 → `~/.config/game-of-life/default.cells`
   （遵循 `XDG_CONFIG_HOME`；不带 `-f` 运行时程序会自动加载它）
 
 ```sh
@@ -161,16 +161,38 @@ $XDG_CONFIG_HOME/game-of-life/settings.json
 ### 默认图案
 
 不带 `-f` 时，程序会查找默认图案文件
-`~/.config/game-of-life/glider.cells`（遵循 `XDG_CONFIG_HOME`）。若存在则加载，
+`~/.config/game-of-life/default.cells`（遵循 `XDG_CONFIG_HOME`）。若存在则加载，
 否则回退到随机开局（密度由 `-p` 指定，默认 0.25）。显式 `-f PATH` 读不到是硬错误，
 但默认文件缺失不是——只会触发随机回退。
 
-要使用它，把图案文件放到那里即可，例如：
+`make install` 会在那里放一个滑翔机作为 `default.cells`。若想换默认图案，
+覆盖它即可，例如：
 
 ```sh
 mkdir -p ~/.config/game-of-life
-cp patterns/glider.cells ~/.config/game-of-life/glider.cells
+cp patterns/pulsar.cells ~/.config/game-of-life/default.cells
 ```
+
+### 内置图案
+
+`patterns/` 目录里有一批经典生命游戏图案，可用 `-f patterns/<名字>.cells` 加载：
+
+| 文件 | 类型 |
+| --- | --- |
+| `default.cells` | 滑翔机（安装为默认图案） |
+| `glider.cells` | 滑翔机——飞船，周期 4 |
+| `lwss.cells` | 轻量级飞船（LWSS） |
+| `blinker.cells` | 振荡器，周期 2 |
+| `toad.cells` | 振荡器，周期 2 |
+| `beacon.cells` | 振荡器，周期 2 |
+| `pulsar.cells` | 振荡器，周期 3 |
+| `pentadecathlon.cells` | 振荡器，周期 15 |
+| `block.cells` | 静物 |
+| `beehive.cells` | 静物 |
+| `r-pentomino.cells` | 玛土撒拉（1103 代后稳定） |
+| `acorn.cells` | 玛土撒拉（5206 代后稳定） |
+| `diehard.cells` | 玛土撒拉（130 代后完全消失） |
+| `glider-gun.cells` | 高斯帕滑翔机枪（需要较宽的画布） |
 
 ## 配置文件格式
 

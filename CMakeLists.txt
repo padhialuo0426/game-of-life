@@ -52,11 +52,11 @@ install(CODE "
     if(cfg_home STREQUAL \"\")
         set(cfg_home \"\$ENV{HOME}/.config\")
     endif()
-    set(dest \"\${cfg_home}/game-of-life/glider.cells\")
+    set(dest \"\${cfg_home}/game-of-life/default.cells\")
     if(EXISTS \"\${dest}\")
         message(STATUS \"Keeping existing default config: \${dest}\")
     else()
-        file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/patterns/glider.cells\"
+        file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/patterns/default.cells\"
              DESTINATION \"\${cfg_home}/game-of-life\")
         message(STATUS \"Installed default config: \${dest}\")
     endif()

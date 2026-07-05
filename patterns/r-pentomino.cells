@@ -1,0 +1,5 @@
+! R-pentomino
+! A famous methuselah: from 5 cells it stabilises only after 1103 generations.
+.OO
+OO.
+.O.

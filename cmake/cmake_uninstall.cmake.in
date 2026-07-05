@@ -20,7 +20,7 @@ endif()
 set(cfg_dir "${cfg_home}/game-of-life")
 
 # Remove the default pattern and the runtime settings file.
-foreach(name "glider.cells" "settings.json")
+foreach(name "default.cells" "settings.json")
     set(cfg "${cfg_dir}/${name}")
     if(EXISTS "${cfg}")
         message(STATUS "Removing ${cfg}")

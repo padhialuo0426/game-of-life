@@ -25,7 +25,7 @@ The binary is written to `build/<preset>/game-of-life`.
 Installation goes to the user's home by default (no root needed):
 
 - the executable → `~/.local/bin/game-of-life`
-- the default pattern → `~/.config/game-of-life/glider.cells`
+- the default pattern → `~/.config/game-of-life/default.cells`
   (respects `XDG_CONFIG_HOME`; this is the file the program auto-loads when run
   without `-f`)
 
@@ -174,18 +174,41 @@ Example `settings.json`:
 ### Default pattern
 
 If `-f` is not given, the program looks for a default pattern file at
-`~/.config/game-of-life/glider.cells` (respecting `XDG_CONFIG_HOME`). If that
+`~/.config/game-of-life/default.cells` (respecting `XDG_CONFIG_HOME`). If that
 file exists it is loaded; otherwise the board falls back to a random start
 (density `-p`, default 0.25). An explicit `-f PATH` that cannot be read is a
 hard error, but a missing default file is not — it just triggers the random
 fallback.
 
-To use it, drop a pattern file there, e.g.:
+`make install` puts a glider there as `default.cells`. To use a different
+default, overwrite it, e.g.:
 
 ```sh
 mkdir -p ~/.config/game-of-life
-cp patterns/glider.cells ~/.config/game-of-life/glider.cells
+cp patterns/pulsar.cells ~/.config/game-of-life/default.cells
 ```
+
+### Included patterns
+
+The `patterns/` directory contains classic Life patterns you can load with
+`-f patterns/<name>.cells`:
+
+| File | Type |
+| --- | --- |
+| `default.cells` | Glider (installed as the default) |
+| `glider.cells` | Glider — spaceship, period 4 |
+| `lwss.cells` | Lightweight spaceship |
+| `blinker.cells` | Oscillator, period 2 |
+| `toad.cells` | Oscillator, period 2 |
+| `beacon.cells` | Oscillator, period 2 |
+| `pulsar.cells` | Oscillator, period 3 |
+| `pentadecathlon.cells` | Oscillator, period 15 |
+| `block.cells` | Still life |
+| `beehive.cells` | Still life |
+| `r-pentomino.cells` | Methuselah (stabilises after 1103 gens) |
+| `acorn.cells` | Methuselah (stabilises after 5206 gens) |
+| `diehard.cells` | Methuselah (vanishes after 130 gens) |
+| `glider-gun.cells` | Gosper glider gun (needs a wide board) |
 
 ## Config file format
 

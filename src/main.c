@@ -101,7 +101,7 @@ static void print_usage(const char *prog) {
     printf("  -p, --density F   random initial density 0..1 (default 0.25)\n");
     printf("  -s, --seed N      random seed (default: time-based)\n");
     printf("  -f, --file PATH   load initial config from a pattern file\n");
-    printf("                    (default: ~/.config/game-of-life/glider.cells if\n");
+    printf("                    (default: ~/.config/game-of-life/default.cells if\n");
     printf("                     present, otherwise a random board)\n");
     printf("      --wrap        start in toroidal (wrap-around) topology\n");
     printf("                    (default: finite grid; edges kill escaping cells)\n");
@@ -488,14 +488,14 @@ static void handle_canvas(App *app, Key key) {
 /* Setup / main loop                                                  */
 /* ------------------------------------------------------------------ */
 
-/* Build the default pattern path: <config-dir>/glider.cells. Returns false if
+/* Build the default pattern path: <config-dir>/default.cells. Returns false if
    the config directory cannot be determined. */
 static bool default_config_path(char *buf, size_t cap) {
     char dir[512];
     if (!settings_config_dir(dir, sizeof(dir))) {
         return false;
     }
-    snprintf(buf, cap, "%s/glider.cells", dir);
+    snprintf(buf, cap, "%s/default.cells", dir);
     return true;
 }
 
