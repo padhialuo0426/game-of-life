@@ -13,6 +13,7 @@ void settings_defaults(Settings *s) {
     s->width = 30;
     s->height = 20;
     s->wrap = false;
+    s->world = 0; /* finite */
     s->delay_ms = 120;
     s->density = 0.25;
 }
@@ -106,6 +107,11 @@ bool settings_load(Settings *s) {
     }
     if ((p = find_value(buf, "wrap")) != NULL) {
         s->wrap = (strncmp(p, "true", 4) == 0);
+        s->world = s->wrap ? 1 : 0; /* legacy fallback if "world" is absent */
+    }
+    if ((p = find_value(buf, "world")) != NULL) {
+        long v = strtol(p, NULL, 10);
+        if (v >= 0 && v <= 2) s->world = (int)v;
     }
     if ((p = find_value(buf, "delay_ms")) != NULL) {
         long v = strtol(p, NULL, 10);
@@ -137,11 +143,12 @@ bool settings_save(const Settings *s) {
             "  \"width\": %d,\n"
             "  \"height\": %d,\n"
             "  \"wrap\": %s,\n"
+            "  \"world\": %d,\n"
             "  \"delay_ms\": %d,\n"
             "  \"density\": %.3f\n"
             "}\n",
-            s->width, s->height, s->wrap ? "true" : "false", s->delay_ms,
-            s->density);
+            s->width, s->height, s->world == 1 ? "true" : "false", s->world,
+            s->delay_ms, s->density);
     fclose(f);
     return true;
 }

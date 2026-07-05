@@ -12,6 +12,7 @@
 
 static struct termios g_saved;
 static bool g_raw_active = false;
+static int g_last_char = 0; /* raw byte behind the most recent KEY_OTHER */
 
 bool terminal_init(void) {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
@@ -93,12 +94,18 @@ Key terminal_read_key(int timeout_ms) {
         case '\r':   /* fall through */
         case '\n':   return KEY_ENTER;
         case ' ':    return KEY_SPACE;
+        case 0x7f:   /* DEL */
+        case 0x08:   return KEY_BACKSPACE;
         case 'q':
         case 'Q':
         case 0x03:   return KEY_QUIT; /* Ctrl-C */
         case 0x1b:   return decode_escape();
-        default:     return KEY_OTHER;
+        default:     g_last_char = (unsigned char)c; return KEY_OTHER;
     }
+}
+
+int terminal_char(void) {
+    return g_last_char;
 }
 
 bool terminal_size(int *cols, int *rows) {

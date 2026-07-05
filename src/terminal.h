@@ -14,6 +14,7 @@ typedef enum {
     KEY_ENTER,
     KEY_SPACE,
     KEY_ESC,
+    KEY_BACKSPACE,
     KEY_QUIT, /* 'q' or Ctrl-C */
     KEY_OTHER
 } Key;
@@ -30,6 +31,10 @@ void terminal_restore(void);
 /* Wait up to timeout_ms for a key. Returns KEY_NONE if the timeout elapses
    with no input. A negative timeout blocks indefinitely. */
 Key terminal_read_key(int timeout_ms);
+
+/* The raw byte behind the most recent KEY_OTHER (e.g. a typed digit), or 0.
+   Only meaningful immediately after terminal_read_key returns KEY_OTHER. */
+int terminal_char(void);
 
 /* Query the terminal window size in character cells. On success writes the
    column and row counts and returns true; returns false if the size is not

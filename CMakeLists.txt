@@ -27,6 +27,7 @@ add_executable(game-of-life
     src/config.c
     src/settings.c
     src/sixel.c
+    src/sparse.c
     src/terminal.c)
 
 target_include_directories(game-of-life PRIVATE src)

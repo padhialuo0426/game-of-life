@@ -4,9 +4,10 @@
 
 An interactive terminal implementation of Conway's Game of Life, written in C
 and built with CMake. Keyboard-driven, with a square cell grid and an on-screen
-button bar. The grid can be either a finite world (patterns that leave the edge
-vanish — the default) or a toroidal one that wraps around. Board size, world
-type and other parameters are remembered between runs.
+button bar. The world can be **finite** (patterns that leave the edge vanish —
+the default), **toroidal** (edges wrap around), or **infinite** (an unbounded,
+sparsely-stored world you pan around). Board size, world type and other
+parameters are remembered between runs.
 
 ## Build
 
@@ -109,17 +110,19 @@ clipped).
 
 | Key | Action |
 | --- | --- |
-| `Left` / `Right` | decrease / increase width |
-| `Down` / `Up` | decrease / increase height |
-| `Space` | toggle world type: Finite ↔ Toroidal |
+| digits `0`–`9` | type a number straight into the focused field |
+| `Backspace` | delete the last digit |
+| `Up` / `Down` or `Tab` | move focus between the Width and Height fields |
+| `Left` / `Right` | nudge the focused field by ∓1 |
+| `Space` | cycle world type: Finite → Toroidal → Infinite |
 | `Enter` | apply (and remember the new settings) |
-| `Tab` or `Esc` | cancel |
+| `Esc` | cancel |
 
-Sizes range from 3 up to the largest board that fits the current terminal (the
-grid uses two columns per cell). Applying only resets the simulation to
-generation 0 when the size actually changed, so a pure world-type switch leaves
-a running simulation intact. Applied changes are saved to `settings.json` (see
-below).
+Just type the size you want — e.g. focus Width, type `120`, press `Down`, type
+`80`. Sizes range from 3 up to the largest board that fits the current terminal.
+Applying only resets the simulation to generation 0 when the size actually
+changed, so a pure Finite↔Toroidal switch leaves a running simulation intact.
+Applied changes are saved to `settings.json` (see below).
 
 ### Fitting the terminal
 
@@ -151,15 +154,31 @@ GOL_SIXEL=0 game-of-life   # force the plain text renderer
 If the terminal cannot report its pixel size, or does not support sixel, the
 program falls back to the text grid automatically.
 
-### World type: finite vs toroidal
+### World type: finite, toroidal, infinite
 
 - **Finite** (default) — cells beyond the border are dead. Patterns that travel
   off an edge collide with the wall and disappear (a glider crashing into a
   corner leaves a small still-life remnant).
 - **Toroidal** — the edges wrap around (top↔bottom, left↔right), so a glider
   that leaves one edge reappears on the opposite one.
+- **Infinite** — an unbounded world with no walls. It is stored sparsely (only
+  the live cells are kept, in a hash set), so memory and per-generation cost
+  scale with the population, not with any area. A glider just keeps travelling
+  forever. The terminal shows a **viewport** into this world; move it around
+  with the arrow keys (see below).
 
-Start in toroidal mode with `--wrap`, or switch any time in canvas mode.
+Start with `--wrap` (toroidal) or `--infinite`, or switch any time in canvas
+mode. Finite and Toroidal use a dense grid engine; Infinite uses the sparse one.
+
+### Panning the infinite world
+
+In the infinite world the board no longer has a fixed size, so in normal mode
+the **arrow keys pan the viewport** and `Tab` cycles the buttons (in bounded
+worlds the arrows also cycle buttons, as there is nothing to pan). The status
+line shows the camera position `Cam: (x,y)` and the live-cell count. In edit
+mode the cursor roams the unbounded world and the view follows it. Switching
+from Infinite back to a bounded world adopts the current viewport as the new
+finite canvas.
 
 ## Settings persistence
 
@@ -185,10 +204,14 @@ Example `settings.json`:
   "width": 30,
   "height": 20,
   "wrap": false,
+  "world": 0,
   "delay_ms": 120,
   "density": 0.250
 }
 ```
+
+`world` is `0` = finite, `1` = toroidal, `2` = infinite. (`wrap` is kept for
+backward compatibility with older versions.)
 
 ## Options
 
@@ -201,6 +224,7 @@ Example `settings.json`:
 | `-s, --seed N` | Random seed (default: time-based) | — |
 | `-f, --file PATH` | Load initial config from a pattern file | default path |
 | `--wrap` | Start in toroidal (wrap-around) world | finite |
+| `--infinite` | Start in the unbounded (sparse) world | finite |
 
 ### Default pattern
 

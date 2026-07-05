@@ -9,7 +9,8 @@
 typedef struct {
     int width;
     int height;
-    bool wrap;      /* true = toroidal world, false = finite world */
+    bool wrap;      /* legacy: true = toroidal (kept for backward compatibility) */
+    int world;      /* 0 = finite, 1 = toroidal, 2 = infinite */
     int delay_ms;
     double density; /* initial random density when no pattern is loaded */
 } Settings;
