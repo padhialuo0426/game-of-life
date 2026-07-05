@@ -3,8 +3,8 @@
 *[中文说明](README.zh.md)*
 
 An interactive terminal implementation of Conway's Game of Life, written in C
-and built with CMake. The board is drawn with **sixel** graphics (real pixels,
-not text characters), with an on-screen button bar. The world can be **finite**
+and built with CMake. The board is drawn with **sixel** real-pixel graphics,
+with an on-screen button bar. The world can be **finite**
 (patterns that leave the edge vanish — the default), **toroidal** (edges wrap
 around), or **infinite** (an unbounded, sparsely-stored world you pan around by
 dragging with the mouse). Board size, world type and other parameters are
@@ -142,8 +142,8 @@ what the terminal can show.
 ### Sixel rendering
 
 The board is drawn as a real **sixel** bitmap: each cell becomes a block of
-pixels, so the board is limited by the terminal's **pixels**, not by a character
-grid, and the world can grow to hundreds of cells across. The image auto-scales
+pixels, so the board is limited only by the terminal's **pixel** dimensions, and
+the world can grow to hundreds of cells across. The image auto-scales
 (zoom-to-fit): small boards get chunky cells, large boards get one-pixel cells.
 
 Sixel support is detected at startup via a Device Attributes query. If your
