@@ -16,8 +16,18 @@ typedef enum {
     KEY_ESC,
     KEY_BACKSPACE,
     KEY_QUIT, /* 'q' or Ctrl-C */
+    KEY_MOUSE, /* a mouse event; details via terminal_mouse() */
     KEY_OTHER
 } Key;
+
+/* A decoded mouse event (SGR 1006 protocol). Coordinates are 0-based character
+   cells (column, row) measured from the top-left of the screen. */
+typedef struct {
+    int x, y;      /* cell column / row */
+    int button;    /* 0=left, 1=middle, 2=right; 64=wheel up, 65=wheel down */
+    bool pressed;  /* true on a press or drag-motion event, false on release */
+    bool motion;   /* true when this is a drag (button held while moving) */
+} MouseEvent;
 
 /* Put the terminal into raw mode (no echo, no line buffering) and hide the
    cursor. Returns false if stdin/stdout is not a terminal. The previous
@@ -35,6 +45,10 @@ Key terminal_read_key(int timeout_ms);
 /* The raw byte behind the most recent KEY_OTHER (e.g. a typed digit), or 0.
    Only meaningful immediately after terminal_read_key returns KEY_OTHER. */
 int terminal_char(void);
+
+/* The most recent mouse event. Only meaningful immediately after
+   terminal_read_key returns KEY_MOUSE. */
+MouseEvent terminal_mouse(void);
 
 /* Query the terminal window size in character cells. On success writes the
    column and row counts and returns true; returns false if the size is not

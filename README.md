@@ -3,11 +3,17 @@
 *[中文说明](README.zh.md)*
 
 An interactive terminal implementation of Conway's Game of Life, written in C
-and built with CMake. Keyboard-driven, with a square cell grid and an on-screen
-button bar. The world can be **finite** (patterns that leave the edge vanish —
-the default), **toroidal** (edges wrap around), or **infinite** (an unbounded,
-sparsely-stored world you pan around). Board size, world type and other
-parameters are remembered between runs.
+and built with CMake. The board is drawn with **sixel** graphics (real pixels,
+not text characters), with an on-screen button bar. The world can be **finite**
+(patterns that leave the edge vanish — the default), **toroidal** (edges wrap
+around), or **infinite** (an unbounded, sparsely-stored world you pan around by
+dragging with the mouse). Board size, world type and other parameters are
+remembered between runs.
+
+> **Requires a sixel-capable terminal** (e.g. iTerm2, Konsole, WezTerm, foot,
+> `xterm -ti vt340`, mlterm, recent Windows Terminal). Terminals without sixel —
+> including the default macOS Terminal.app — are not supported; the program
+> exits with a message on startup.
 
 ## Build
 
@@ -59,16 +65,16 @@ Notes:
 ./build/release/game-of-life --help                      # all options
 ```
 
-An interactive terminal is required.
+A sixel-capable interactive terminal is required (see [Requirements](#conways-game-of-life)).
 
 ## Controls
 
-The bar below the grid has six buttons:
+The bar below the image has six buttons:
 **Start / Pause / Step / Reset / Edit / Canvas**. There is no Quit button — `q`
 (or `Ctrl-C`) quits from any screen.
 
-Each cell is drawn two characters wide so the grid looks square despite the
-terminal's tall character cells.
+The board is drawn as a sixel bitmap: each cell is a square block of pixels that
+auto-scales to fill the available space.
 
 ### Normal mode (button bar)
 
@@ -89,9 +95,9 @@ terminal's tall character cells.
 
 ### Edit mode
 
-Draw or modify the initial configuration by hand. A blinking hollow-square
-cursor (`[]`) marks the current cell; it flashes so you can still see whether
-that cell is alive or dead.
+Draw or modify the initial configuration by hand. A blinking outline (a yellow
+border around the cell) marks the current cell; it flashes so you can still see
+whether that cell is alive or dead.
 
 | Key | Action |
 | --- | --- |
@@ -133,26 +139,22 @@ running, the board adapts — it shrinks to fit a smaller window (it is not forc
 to grow when the window gets larger). A very large `-w`/`-h` is simply clamped to
 what the terminal can show.
 
-### Sixel graphics (much larger boards)
+### Sixel rendering
 
-If your terminal supports **sixel** graphics (Konsole, foot, WezTerm, xterm
-`-ti vt340`, mlterm, recent Windows Terminal, …), the board is drawn as a real
-bitmap instead of text cells. Each cell becomes a block of pixels, so the board
-is limited by the terminal's **pixels**, not by its character grid — that is
-roughly an 8× jump in how many cells fit on screen, and it lets the world grow to
-hundreds of cells across. The image auto-scales (zoom-to-fit): small boards get
-chunky cells, large boards get one-pixel cells.
+The board is drawn as a real **sixel** bitmap: each cell becomes a block of
+pixels, so the board is limited by the terminal's **pixels**, not by a character
+grid, and the world can grow to hundreds of cells across. The image auto-scales
+(zoom-to-fit): small boards get chunky cells, large boards get one-pixel cells.
 
-Sixel is detected automatically at startup (a Device Attributes query). To force
-it, set an environment variable:
+Sixel support is detected at startup via a Device Attributes query. If your
+terminal supports sixel but is not detected, force detection on:
 
 ```sh
-GOL_SIXEL=1 game-of-life   # force sixel on
-GOL_SIXEL=0 game-of-life   # force the plain text renderer
+GOL_SIXEL=1 game-of-life   # skip the query, assume sixel is available
 ```
 
-If the terminal cannot report its pixel size, or does not support sixel, the
-program falls back to the text grid automatically.
+Setting `GOL_SIXEL=0` forces detection off, in which case the program will
+report that a sixel-capable terminal is required and exit.
 
 ### World type: finite, toroidal, infinite
 
@@ -164,21 +166,22 @@ program falls back to the text grid automatically.
 - **Infinite** — an unbounded world with no walls. It is stored sparsely (only
   the live cells are kept, in a hash set), so memory and per-generation cost
   scale with the population, not with any area. A glider just keeps travelling
-  forever. The terminal shows a **viewport** into this world; move it around
-  with the arrow keys (see below).
+  forever. The terminal shows a **viewport** into this world; drag with the
+  mouse to move it around (see below).
 
 Start with `--wrap` (toroidal) or `--infinite`, or switch any time in canvas
 mode. Finite and Toroidal use a dense grid engine; Infinite uses the sparse one.
 
 ### Panning the infinite world
 
-In the infinite world the board no longer has a fixed size, so in normal mode
-the **arrow keys pan the viewport** and `Tab` cycles the buttons (in bounded
-worlds the arrows also cycle buttons, as there is nothing to pan). The status
-line shows the camera position `Cam: (x,y)` and the live-cell count. In edit
-mode the cursor roams the unbounded world and the view follows it. Switching
-from Infinite back to a bounded world adopts the current viewport as the new
-finite canvas.
+In the infinite world the board no longer has a fixed size, so you pan the
+viewport by **dragging with the left mouse button** (grab-and-drag: the point
+under the cursor stays under it). The `Tab`/`Left`/`Right` keys move the button
+selection, exactly as in the bounded worlds. The status line shows the camera
+position `Cam: (x,y)` and the live-cell count. In edit mode the cursor roams the
+unbounded world with the arrow keys and the view follows it. Switching from
+Infinite back to a bounded world adopts the current viewport as the new finite
+canvas.
 
 ## Settings persistence
 

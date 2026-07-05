@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,18 +30,17 @@
    line fully overwrites a longer previous one (no leftover characters). */
 #define EOL              "\033[K\n"
 
+/* Like EOL but without the newline: used for the very last line of a frame so we
+   never emit a '\n' on the bottom row, which would scroll the screen (and, in
+   sixel mode, push the image into scrollback where it is retained). */
+#define CLR_EOL          "\033[K"
+
 #define MIN_DIM 3
 /* Absolute safety caps (bound memory even on an absurdly large terminal). The
    effective per-run maximum is the smaller value that fits the terminal; see
    fit_limits(). */
 #define HARD_MAX_W 1000
 #define HARD_MAX_H 1000
-/* Screen space the UI needs around the grid, used to fit the board to the
-   terminal. Horizontally: the two border columns, plus two columns per cell.
-   Vertically: top+bottom border, status, buttons, hint, two blank separators,
-   and one spare row so the final newline never scrolls the screen. */
-#define GRID_H_OVERHEAD 2
-#define GRID_V_OVERHEAD 8
 #define BLINK_MS 400
 #define MAX_DELAY_MS 3600000 /* 1 hour; keeps the poll timeout within int */
 
@@ -92,8 +92,9 @@ typedef struct {
     WorldType world;            /* current world type */
     int max_w, max_h;           /* largest board that fits the terminal now */
 
-    bool sixel;                 /* draw the board as a sixel bitmap */
     int sx_last_w, sx_last_h;   /* last sixel image pixel size (clear on change) */
+    uint64_t sx_last_hash;      /* hash of the last emitted image bytes */
+    bool sx_drawn;              /* an image has been emitted at least once */
 
     /* Infinite world (WORLD_INFINITE): unbounded sparse state + a pannable
        viewport snapshotted into `view` for rendering. */
@@ -102,6 +103,13 @@ typedef struct {
     int cam_x, cam_y;           /* viewport top-left in world coordinates */
     int view_w, view_h;         /* current viewport size in cells */
     Board view;                 /* scratch dense snapshot of the viewport */
+
+    /* Left-drag panning (WORLD_INFINITE). While the left button is held, the
+       camera is recomputed from the anchor captured on press so the grabbed
+       point stays under the cursor. */
+    bool dragging;
+    int drag_mx, drag_my;       /* mouse cell where the drag started */
+    int drag_cam_x, drag_cam_y; /* camera position when the drag started */
 
     long delay_ms;
     bool running;
@@ -138,8 +146,8 @@ static void on_winch(int sig) {
 }
 
 /* Restore the terminal and exit on a terminating signal. Re-show the cursor
-   too (terminal_restore only touches termios), so a kill does not leave the
-   user's terminal with an invisible cursor. write() is async-signal-safe. */
+   (terminal_restore leaves the alternate screen and restores termios, but does
+   not touch the cursor). write() is async-signal-safe. */
 static void on_term(int sig) {
     ssize_t r = write(STDOUT_FILENO, ANSI_SHOW_CURSOR, sizeof(ANSI_SHOW_CURSOR) - 1);
     (void)r;
@@ -182,7 +190,7 @@ static void print_usage(const char *prog) {
     printf("runs in ~/.config/game-of-life/settings.json.\n\n");
     printf("Buttons: Start Pause Step Reset Edit Canvas   (q quits from anywhere)\n");
     printf("Normal:  Tab/Left/Right select   Space/Enter activate   q quit\n");
-    printf("         (Infinite world: arrows pan the view, Tab selects buttons)\n");
+    printf("         (Infinite world: drag with the mouse to pan the view)\n");
     printf("Edit:    arrows move cursor   Space toggle cell   Tab/Esc leave\n");
     printf("Canvas:  type digits to set size   Up/Down field   Left/Right +/-1\n");
     printf("         Space cycles Finite/Toroidal/Infinite   Enter apply   Esc cancel\n");
@@ -273,27 +281,20 @@ static int clamp_dim(int v, int lo, int hi); /* defined below */
    a comfortable cell size (you pan to see beyond it). Mirrors the reservations
    made by the renderers so the image plus controls fit without scrolling. */
 static void infinite_viewport(const App *app, int *vw, int *vh) {
-    if (app->sixel) {
-        int cols, rows, xpx, ypx;
-        if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
-            int cch = ypx / rows, ccw = xpx / cols;
-            if (cch > 0 && ccw > 0) {
-                int avail_w = xpx - ccw;
-                int avail_h = ypx - SIXEL_UI_ROWS * cch;
-                *vw = clamp_dim(avail_w / INFINITE_CELL_PX, MIN_DIM, HARD_MAX_W);
-                *vh = clamp_dim(avail_h / INFINITE_CELL_PX, MIN_DIM, HARD_MAX_H);
-                return;
-            }
+    (void)app;
+    int cols, rows, xpx, ypx;
+    if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
+        int cch = ypx / rows, ccw = xpx / cols;
+        if (cch > 0 && ccw > 0) {
+            int avail_w = xpx - ccw;
+            int avail_h = ypx - SIXEL_UI_ROWS * cch;
+            *vw = clamp_dim(avail_w / INFINITE_CELL_PX, MIN_DIM, HARD_MAX_W);
+            *vh = clamp_dim(avail_h / INFINITE_CELL_PX, MIN_DIM, HARD_MAX_H);
+            return;
         }
     }
-    int cols, rows;
-    if (terminal_size(&cols, &rows)) {
-        *vw = clamp_dim((cols - GRID_H_OVERHEAD) / 2, MIN_DIM, HARD_MAX_W);
-        *vh = clamp_dim(rows - GRID_V_OVERHEAD, MIN_DIM, HARD_MAX_H);
-    } else {
-        *vw = 30;
-        *vh = 20;
-    }
+    *vw = 30; /* pixel size briefly unavailable (e.g. mid-resize) */
+    *vh = 20;
 }
 
 /* Return the board to render this frame and the cursor position within it
@@ -336,9 +337,9 @@ static const Board *prepare_view(App *app, int *cx, int *cy) {
     return &app->view;
 }
 
-/* Append the controls block shared by both renderers: status line, a blank
-   line, the button bar, a blank line, and the hint line. Occupies five text
-   rows (plus the caller's clear-below). `board` is the board being rendered. */
+/* Append the controls block below the sixel image: status line, a blank line,
+   the button bar, a blank line, and the hint line. Occupies five text rows (plus
+   the caller's clear-below). `board` is the board being rendered. */
 static void append_controls(const App *app, const Board *board,
                             char *buf, size_t cap, size_t *n) {
     const bool inf = (app->world == WORLD_INFINITE);
@@ -399,81 +400,45 @@ static void append_controls(const App *app, const Board *board,
     }
     appendf(buf, cap, n, EOL EOL);
 
+    /* The hint is the last line of the frame, so it ends with CLR_EOL (no
+       newline) to avoid scrolling the screen on the bottom row. */
     switch (app->mode) {
         case UI_EDIT:
             appendf(buf, cap, n,
-                    " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" EOL);
+                    " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
             break;
         case UI_CANVAS:
             appendf(buf, cap, n,
                     " Type digits to set size   Up/Down field   Left/Right +/-1   "
-                    "Space world   Enter apply   Esc cancel" EOL);
+                    "Space world   Enter apply   Esc cancel" CLR_EOL);
             break;
         default:
             if (inf) {
                 appendf(buf, cap, n,
-                        " Arrows pan   Tab select   Space/Enter activate   q quit" EOL);
+                        " Drag to pan   Tab/Left/Right select   Space/Enter activate   q quit" CLR_EOL);
             } else {
                 appendf(buf, cap, n,
-                        " Tab/Left/Right select   Space/Enter activate   q quit" EOL);
+                        " Tab/Left/Right select   Space/Enter activate   q quit" CLR_EOL);
             }
             break;
     }
 }
 
-/* Text renderer: a box-drawing grid with two columns per cell. Used when sixel
-   is unavailable. `cx`/`cy` mark the edit cursor within `board` (cx < 0: none). */
-static void render_chars(const App *app, const Board *board, int cx, int cy) {
-    const int inner = board->width * 2; /* two columns per cell => square look */
-    size_t cap = (size_t)board->width * board->height * 12 +
-                 (size_t)inner * 8 + 2048;
-    char *buf = malloc(cap);
-    if (buf == NULL) return;
-    size_t n = 0;
-
-    appendf(buf, cap, &n, ANSI_HOME);
-
-    /* Top border. */
-    appendf(buf, cap, &n, "┌");
-    for (int i = 0; i < inner; i++) appendf(buf, cap, &n, "─");
-    appendf(buf, cap, &n, "┐" EOL);
-
-    /* Grid rows. In edit mode the cell under the cursor blinks: on the "on"
-       phase it shows a hollow square outline, on the "off" phase the real cell,
-       so the marker flashes while still revealing the cell's true state. */
-    for (int y = 0; y < board->height; y++) {
-        appendf(buf, cap, &n, "│");
-        for (int x = 0; x < board->width; x++) {
-            const char *glyph = board_get(board, x, y) ? "██" : "  ";
-            bool at_cursor = (cx >= 0 && x == cx && y == cy);
-            if (at_cursor && app->blink_on) {
-                appendf(buf, cap, &n, "[]"); /* hollow square marker */
-            } else {
-                appendf(buf, cap, &n, "%s", glyph);
-            }
-        }
-        appendf(buf, cap, &n, "│" EOL);
+/* FNV-1a hash of a byte buffer, used to detect whether the rendered image is
+   identical to the previous frame's (so we can skip re-emitting it). */
+static uint64_t fnv1a(const char *data, size_t len) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned char)data[i];
+        h *= 0x100000001b3ULL;
     }
-
-    /* Bottom border. */
-    appendf(buf, cap, &n, "└");
-    for (int i = 0; i < inner; i++) appendf(buf, cap, &n, "─");
-    appendf(buf, cap, &n, "┘" EOL);
-
-    append_controls(app, board, buf, cap, &n);
-
-    /* Erase anything left below (e.g. rows from a previously taller board). */
-    appendf(buf, cap, &n, ANSI_CLR_BELOW);
-
-    fwrite(buf, 1, n, stdout);
-    fflush(stdout);
-    free(buf);
+    return h;
 }
 
 /* Sixel renderer: draw the board as a bitmap (one cell = cell_px pixels, chosen
    to fill the available space), then the text controls below it. Returns false
-   if the layout cannot be computed (no pixel size, board too tall, etc.), so
-   the caller can fall back to the text renderer. */
+   if the layout cannot be computed (no pixel size, board too tall, etc.); the
+   caller then simply skips the frame. Sixel is the only renderer. */
 static bool render_sixel(App *app, const Board *board, int cx, int cy) {
     int cols, rows, xpx, ypx;
     if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
@@ -506,18 +471,33 @@ static bool render_sixel(App *app, const Board *board, int cx, int cy) {
     char *img = sixel_render_board(board, cell, cx, cy, con, &img_len);
     if (img == NULL) return false;
 
-    /* Header: clear the screen only when the image size changed (avoids leaving
-       stale pixels around a now-smaller image without flickering every frame). */
-    if (img_w != app->sx_last_w || img_h != app->sx_last_h) {
-        fputs(ANSI_CLEAR, stdout);
-        app->sx_last_w = img_w;
-        app->sx_last_h = img_h;
+    /* Re-emit the sixel image only when it actually changed since the last frame.
+       This skips the (expensive, and on some terminals leaky) bitmap when only
+       the controls change — moving the button selection, a paused/stopped board,
+       a stabilised pattern — so idle frames cost nothing and do not pile images
+       into terminals that retain them (e.g. older iTerm2). The controls below are
+       always redrawn. */
+    const uint64_t hash = fnv1a(img, img_len);
+    const bool image_changed = !app->sx_drawn || hash != app->sx_last_hash ||
+                               img_w != app->sx_last_w || img_h != app->sx_last_h;
+    if (image_changed) {
+        /* Clear the screen only when the image size changed (avoids leaving stale
+           pixels around a now-smaller image without flickering every frame). */
+        if (img_w != app->sx_last_w || img_h != app->sx_last_h) {
+            fputs(ANSI_CLEAR, stdout);
+            app->sx_last_w = img_w;
+            app->sx_last_h = img_h;
+        }
+        fputs(ANSI_HOME, stdout);
+        fwrite(img, 1, img_len, stdout);
+        app->sx_last_hash = hash;
+        app->sx_drawn = true;
     }
-    fputs(ANSI_HOME, stdout);
-    fwrite(img, 1, img_len, stdout);
     free(img);
 
-    /* Controls, positioned just below the image. */
+    /* Controls, positioned just below the image. We run on the alternate screen
+       buffer (no scrollback), so scrolled sixel images are discarded rather than
+       retained — no per-frame scrollback clearing is needed here. */
     char ctl[2048];
     size_t n = 0;
     appendf(ctl, sizeof(ctl), &n, "\033[%d;1H", img_rows + 1);
@@ -532,8 +512,7 @@ static bool render_sixel(App *app, const Board *board, int cx, int cy) {
 static void render(App *app) {
     int cx, cy;
     const Board *board = prepare_view(app, &cx, &cy);
-    if (app->sixel && render_sixel(app, board, cx, cy)) return;
-    render_chars(app, board, cx, cy);
+    render_sixel(app, board, cx, cy); /* sixel is required; a failed frame is skipped */
 }
 
 /* ------------------------------------------------------------------ */
@@ -699,26 +678,53 @@ static void activate_button(App *app) {
     }
 }
 
-static void handle_normal(App *app, Key key) {
-    /* In the infinite world the arrow keys pan the viewport (and Tab alone
-       cycles the buttons); in a bounded world they also cycle the buttons. */
-    if (app->world == WORLD_INFINITE) {
-        int stepx = app->view_w / 4;
-        int stepy = app->view_h / 4;
-        if (stepx < 1) stepx = 1;
-        if (stepy < 1) stepy = 1;
-        switch (key) {
-            case KEY_NONE:  if (app->sim == SIM_RUNNING) step_once(app); break;
-            case KEY_LEFT:  app->cam_x -= stepx; break;
-            case KEY_RIGHT: app->cam_x += stepx; break;
-            case KEY_UP:    app->cam_y -= stepy; break;
-            case KEY_DOWN:  app->cam_y += stepy; break;
-            case KEY_TAB:   app->selected = (app->selected + 1) % BTN_COUNT; break;
-            case KEY_ENTER:
-            case KEY_SPACE: activate_button(app); break;
-            case KEY_QUIT:  app->running = false; break;
-            default:        break;
+/* Convert a delta measured in screen character cells into a delta in world
+   cells. The mouse reports character cells, while the sixel renderer draws
+   INFINITE_CELL_PX pixels per world cell, so scale through the pixel size of a
+   character cell (character-cell pixels / world-cell pixels). */
+static void screen_delta_to_world(const App *app, int dcol, int drow,
+                                   int *wdx, int *wdy) {
+    (void)app;
+    int cols, rows, xpx, ypx;
+    if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
+        int ccw = xpx / cols, cch = ypx / rows;
+        if (ccw > 0 && cch > 0) {
+            *wdx = (dcol * ccw) / INFINITE_CELL_PX;
+            *wdy = (drow * cch) / INFINITE_CELL_PX;
+            return;
         }
+    }
+    *wdx = dcol; /* pixel size unavailable: fall back to raw cell delta */
+    *wdy = drow;
+}
+
+/* Left-drag panning of the infinite-world viewport. Press captures an anchor;
+   subsequent drag-motion events recompute the camera from it so the grabbed
+   point tracks the cursor; release ends the drag. */
+static void handle_mouse_pan(App *app) {
+    MouseEvent m = terminal_mouse();
+    if (m.button == 0 && m.pressed && !m.motion) {
+        app->dragging = true;
+        app->drag_mx = m.x;
+        app->drag_my = m.y;
+        app->drag_cam_x = app->cam_x;
+        app->drag_cam_y = app->cam_y;
+    } else if (m.button == 0 && m.motion && app->dragging) {
+        int wdx, wdy;
+        screen_delta_to_world(app, m.x - app->drag_mx, m.y - app->drag_my,
+                              &wdx, &wdy);
+        app->cam_x = app->drag_cam_x - wdx;
+        app->cam_y = app->drag_cam_y - wdy;
+    } else if (!m.pressed) {
+        app->dragging = false; /* button released */
+    }
+}
+
+static void handle_normal(App *app, Key key) {
+    /* Left-drag pans the infinite-world viewport; the arrow keys always move the
+       button selection (in every world). */
+    if (key == KEY_MOUSE) {
+        if (app->world == WORLD_INFINITE) handle_mouse_pan(app);
         return;
     }
 
@@ -951,36 +957,26 @@ static int clamp_dim(int v, int lo, int hi) {
 }
 
 /* Compute the largest board (cells) that fits the current terminal, bounded by
-   the absolute safety caps. In sixel mode the limit is the pixel budget (down
-   to one pixel per cell); otherwise it is the character grid. Falls back to the
-   caps if the size is unavailable (e.g. not a terminal). */
-static void fit_limits(bool sixel, int *max_w, int *max_h) {
-    if (sixel) {
-        int cols, rows, xpx, ypx;
-        if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
-            int cch = ypx / rows, ccw = xpx / cols;
-            if (cch > 0 && ccw > 0) {
-                *max_w = clamp_dim(xpx - ccw, MIN_DIM, HARD_MAX_W);
-                *max_h = clamp_dim(ypx - SIXEL_UI_ROWS * cch, MIN_DIM, HARD_MAX_H);
-                return;
-            }
+   the absolute safety caps. The limit is the sixel pixel budget (down to one
+   pixel per cell). Falls back to the caps if the pixel size is unavailable. */
+static void fit_limits(int *max_w, int *max_h) {
+    int cols, rows, xpx, ypx;
+    if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
+        int cch = ypx / rows, ccw = xpx / cols;
+        if (cch > 0 && ccw > 0) {
+            *max_w = clamp_dim(xpx - ccw, MIN_DIM, HARD_MAX_W);
+            *max_h = clamp_dim(ypx - SIXEL_UI_ROWS * cch, MIN_DIM, HARD_MAX_H);
+            return;
         }
-        /* Pixel size unavailable: fall through to the character-grid formula. */
     }
-    int cols, rows;
-    if (terminal_size(&cols, &rows)) {
-        *max_w = clamp_dim((cols - GRID_H_OVERHEAD) / 2, MIN_DIM, HARD_MAX_W);
-        *max_h = clamp_dim(rows - GRID_V_OVERHEAD, MIN_DIM, HARD_MAX_H);
-    } else {
-        *max_w = HARD_MAX_W;
-        *max_h = HARD_MAX_H;
-    }
+    *max_w = HARD_MAX_W;
+    *max_h = HARD_MAX_H;
 }
 
 /* React to a terminal resize: recompute the fit limits and, if the board no
    longer fits, shrink it to fit (keeping pending canvas values in bounds). */
 static void handle_winch(App *app) {
-    fit_limits(app->sixel, &app->max_w, &app->max_h);
+    fit_limits(&app->max_w, &app->max_h);
 
     /* Infinite world: the viewport is recomputed every frame, nothing to
        reallocate here. */
@@ -1031,12 +1027,22 @@ int main(int argc, char **argv) {
         return 1;
     }
     atexit(terminal_restore);
-    bool sixel = terminal_query_sixel();
+
+    /* Sixel is the only renderer, so it is a hard requirement. */
+    if (!terminal_query_sixel()) {
+        terminal_restore();
+        fprintf(stderr,
+                "This program requires a sixel-capable terminal "
+                "(e.g. iTerm2, Konsole, WezTerm, foot, xterm -ti vt340).\n"
+                "If your terminal supports sixel but is not detected, force it "
+                "with GOL_SIXEL=1.\n");
+        return 1;
+    }
 
     /* Clamp the board to what fits the terminal now and fold the effective
        (CLI-overridden) parameters back into settings. */
     int max_w, max_h;
-    fit_limits(sixel, &max_w, &max_h);
+    fit_limits(&max_w, &max_h);
     settings.width = clamp_dim(opt.width, MIN_DIM, max_w);
     settings.height = clamp_dim(opt.height, MIN_DIM, max_h);
     settings.world = (int)opt.world;
@@ -1069,7 +1075,6 @@ int main(int argc, char **argv) {
     app.canvas_field = 0;
     app.max_w = max_w;
     app.max_h = max_h;
-    app.sixel = sixel;
     app.view_w = opt.width;
     app.view_h = opt.height;
     app.settings = &settings;
@@ -1156,6 +1161,8 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Show the cursor; terminal_restore leaves the alternate screen, which
+       restores the user's original screen (and discards our sixel images). */
     printf(ANSI_SHOW_CURSOR);
     fflush(stdout);
     terminal_restore();
