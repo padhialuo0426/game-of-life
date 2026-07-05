@@ -63,8 +63,9 @@ An interactive terminal is required.
 
 ## Controls
 
-The bar below the grid has seven buttons:
-**Start / Step / Pause / Stop / Edit / Canvas / Quit**.
+The bar below the grid has six buttons:
+**Start / Pause / Step / Reset / Edit / Canvas**. There is no Quit button — `q`
+(or `Ctrl-C`) quits from any screen.
 
 Each cell is drawn two characters wide so the grid looks square despite the
 terminal's tall character cells.
@@ -79,13 +80,12 @@ terminal's tall character cells.
 | `q` / `Ctrl-C` | quit immediately |
 
 - **Start** — begin, or resume from pause.
+- **Pause** — freeze the simulation (Start resumes from where it stopped).
 - **Step** — advance exactly one generation, then pause. Works from any
-  paused/stopped state, so you can watch the simulation frame by frame.
-- **Pause** — freeze the simulation.
-- **Stop** — stop and reset to the initial configuration (generation 0).
+  paused/reset state, so you can watch the simulation frame by frame.
+- **Reset** — reload the initial configuration (generation 0).
 - **Edit** — enter edit mode (see below).
 - **Canvas** — enter canvas mode: resize and/or switch world type (see below).
-- **Quit** — exit the program.
 
 ### Edit mode
 
@@ -99,8 +99,8 @@ that cell is alive or dead.
 | `Space` or `Enter` | toggle the cell under the cursor (alive/dead) |
 | `Tab` or `Esc` | leave edit mode |
 
-On leaving, the edited grid becomes the new initial configuration, so **Stop**
-resets back to what you drew.
+On leaving, the edited grid becomes the new initial configuration, so **Reset**
+returns to what you drew.
 
 ### Canvas mode
 

@@ -63,14 +63,15 @@ typedef enum { UI_NORMAL, UI_EDIT, UI_CANVAS } UiMode;
 /* Simulation sub-state, meaningful in UI_NORMAL. */
 typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
 
-/* Bottom button bar. Order matters: it is the left-to-right layout. */
+/* Bottom button bar. Order matters: it is the left-to-right layout. There is no
+   Quit button — 'q' (or Ctrl-C) quits from any screen. */
 typedef enum {
-    BTN_START, BTN_STEP, BTN_PAUSE, BTN_STOP, BTN_EDIT, BTN_CANVAS, BTN_QUIT,
+    BTN_START, BTN_PAUSE, BTN_STEP, BTN_RESET, BTN_EDIT, BTN_CANVAS,
     BTN_COUNT
 } Button;
 
 static const char *const BUTTON_LABELS[BTN_COUNT] = {
-    " Start ", " Step ", " Pause ", " Stop ", " Edit ", " Canvas ", " Quit "};
+    " Start ", " Pause ", " Step ", " Reset ", " Edit ", " Canvas "};
 
 typedef struct {
     Board initial; /* starting config, restored by Stop */
@@ -174,7 +175,7 @@ static void print_usage(const char *prog) {
     printf("      --help        show this help and exit\n\n");
     printf("Settings such as board size and world type are remembered between\n");
     printf("runs in ~/.config/game-of-life/settings.json.\n\n");
-    printf("Buttons: Start Step Pause Stop Edit Canvas Quit\n");
+    printf("Buttons: Start Pause Step Reset Edit Canvas   (q quits from anywhere)\n");
     printf("Normal:  Tab/Left/Right select   Space/Enter activate   q quit\n");
     printf("         (Infinite world: arrows pan the view, Tab selects buttons)\n");
     printf("Edit:    arrows move cursor   Space toggle cell   Tab/Esc leave\n");
@@ -655,14 +656,15 @@ static void activate_button(App *app) {
         case BTN_START:
             if (app->sim != SIM_RUNNING) app->sim = SIM_RUNNING;
             break;
+        case BTN_PAUSE:
+            if (app->sim == SIM_RUNNING) app->sim = SIM_PAUSED;
+            break;
         case BTN_STEP:
             step_once(app);
             app->sim = SIM_PAUSED;
             break;
-        case BTN_PAUSE:
-            if (app->sim == SIM_RUNNING) app->sim = SIM_PAUSED;
-            break;
-        case BTN_STOP:
+        case BTN_RESET:
+            /* Reload the initial configuration (generation 0). */
             app->sim = SIM_STOPPED;
             if (app->world == WORLD_INFINITE) {
                 sparse_copy(app->sparse, app->sparse_initial);
@@ -688,9 +690,6 @@ static void activate_button(App *app) {
             app->pending_world = app->world;
             app->canvas_field = 0;
             app->canvas_editing = false;
-            break;
-        case BTN_QUIT:
-            app->running = false;
             break;
     }
 }
