@@ -1,9 +1,10 @@
-#define _POSIX_C_SOURCE 200809L /* termios, poll */
+#define _DEFAULT_SOURCE /* termios, poll, ioctl/TIOCGWINSZ, struct winsize */
 
 #include "terminal.h"
 
 #include <poll.h>
 #include <stdio.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -96,4 +97,17 @@ Key terminal_read_key(int timeout_ms) {
         case 0x1b:   return decode_escape();
         default:     return KEY_OTHER;
     }
+}
+
+bool terminal_size(int *cols, int *rows) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0) {
+        return false;
+    }
+    if (ws.ws_col == 0 || ws.ws_row == 0) {
+        return false;
+    }
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return true;
 }

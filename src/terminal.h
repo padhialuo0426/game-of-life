@@ -31,4 +31,9 @@ void terminal_restore(void);
    with no input. A negative timeout blocks indefinitely. */
 Key terminal_read_key(int timeout_ms);
 
+/* Query the terminal window size in character cells. On success writes the
+   column and row counts and returns true; returns false if the size is not
+   available (e.g. output is not a terminal). */
+bool terminal_size(int *cols, int *rows);
+
 #endif /* GAME_OF_LIFE_TERMINAL_H */

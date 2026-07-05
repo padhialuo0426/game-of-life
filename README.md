@@ -115,10 +115,20 @@ clipped).
 | `Enter` | apply (and remember the new settings) |
 | `Tab` or `Esc` | cancel |
 
-Sizes are clamped to the range 3..120 (width) / 3..60 (height). Applying only
-resets the simulation to generation 0 when the size actually changed, so a pure
-world-type switch leaves a running simulation intact. Applied changes are saved
-to `settings.json` (see below).
+Sizes range from 3 up to the largest board that fits the current terminal (the
+grid uses two columns per cell). Applying only resets the simulation to
+generation 0 when the size actually changed, so a pure world-type switch leaves
+a running simulation intact. Applied changes are saved to `settings.json` (see
+below).
+
+### Fitting the terminal
+
+The board is automatically kept within the terminal window: on startup the
+requested/remembered size is clamped to fit, and the maximum size in canvas mode
+is whatever fits. If you resize the terminal window while the program is
+running, the board adapts — it shrinks to fit a smaller window (it is not forced
+to grow when the window gets larger). A very large `-w`/`-h` is simply clamped to
+what the terminal can show.
 
 ### World type: finite vs toroidal
 

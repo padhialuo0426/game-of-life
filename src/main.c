@@ -1,3 +1,5 @@
+#define _DEFAULT_SOURCE /* sigaction, SIGWINCH */
+
 #include "board.h"
 #include "config.h"
 #include "settings.h"
@@ -25,9 +27,19 @@
 #define EOL              "\033[K\n"
 
 #define MIN_DIM 3
-#define MAX_W 120
-#define MAX_H 60
+/* Absolute safety caps (bound memory even on an absurdly large terminal). The
+   effective per-run maximum is the smaller value that fits the terminal; see
+   fit_limits(). */
+#define HARD_MAX_W 1000
+#define HARD_MAX_H 1000
+/* Screen space the UI needs around the grid, used to fit the board to the
+   terminal. Horizontally: the two border columns, plus two columns per cell.
+   Vertically: top+bottom border, status, buttons, hint, two blank separators,
+   and one spare row so the final newline never scrolls the screen. */
+#define GRID_H_OVERHEAD 2
+#define GRID_V_OVERHEAD 8
 #define BLINK_MS 400
+#define MAX_DELAY_MS 3600000 /* 1 hour; keeps the poll timeout within int */
 
 /* Top-level interaction mode. */
 typedef enum { UI_NORMAL, UI_EDIT, UI_CANVAS } UiMode;
@@ -58,6 +70,7 @@ typedef struct {
     int pending_w, pending_h;   /* target size (UI_CANVAS) */
     bool pending_wrap;          /* target topology (UI_CANVAS) */
     bool wrap;                  /* current topology: true=toroidal, false=finite */
+    int max_w, max_h;           /* largest board that fits the terminal now */
 
     long delay_ms;
     bool running;
@@ -74,6 +87,20 @@ static const char *sim_label(SimState s) {
 
 static const char *topo_label(bool wrap) {
     return wrap ? "Toroidal" : "Finite";
+}
+
+/* Set by the SIGWINCH handler; the main loop notices it and refits the board. */
+static volatile sig_atomic_t g_resized = 0;
+
+static void on_winch(int sig) {
+    (void)sig;
+    g_resized = 1;
+}
+
+/* Restore the terminal and exit on a terminating signal. */
+static void on_term(int sig) {
+    terminal_restore();
+    _Exit(128 + sig);
 }
 
 /* ------------------------------------------------------------------ */
@@ -144,13 +171,13 @@ static int parse_args(int argc, char **argv, Options *opt) {
             print_usage(argv[0]);
             return 1;
         } else if (strcmp(a, "-w") == 0 || strcmp(a, "--width") == 0) {
-            if (!parse_long(argc, argv, &i, &lv) || lv < MIN_DIM || lv > MAX_W) goto bad;
+            if (!parse_long(argc, argv, &i, &lv) || lv < MIN_DIM || lv > HARD_MAX_W) goto bad;
             opt->width = (int)lv;
         } else if (strcmp(a, "-h") == 0 || strcmp(a, "--height") == 0) {
-            if (!parse_long(argc, argv, &i, &lv) || lv < MIN_DIM || lv > MAX_H) goto bad;
+            if (!parse_long(argc, argv, &i, &lv) || lv < MIN_DIM || lv > HARD_MAX_H) goto bad;
             opt->height = (int)lv;
         } else if (strcmp(a, "-d") == 0 || strcmp(a, "--delay") == 0) {
-            if (!parse_long(argc, argv, &i, &lv) || lv < 0) goto bad;
+            if (!parse_long(argc, argv, &i, &lv) || lv < 0 || lv > MAX_DELAY_MS) goto bad;
             opt->delay_ms = lv;
         } else if (strcmp(a, "-p") == 0 || strcmp(a, "--density") == 0) {
             if (!parse_double(argc, argv, &i, &dv) || dv < 0.0 || dv > 1.0) goto bad;
@@ -448,13 +475,13 @@ static void handle_canvas(App *app, Key key) {
             if (app->pending_w > MIN_DIM) app->pending_w--;
             break;
         case KEY_RIGHT:
-            if (app->pending_w < MAX_W) app->pending_w++;
+            if (app->pending_w < app->max_w) app->pending_w++;
             break;
         case KEY_DOWN:
             if (app->pending_h > MIN_DIM) app->pending_h--;
             break;
         case KEY_UP:
-            if (app->pending_h < MAX_H) app->pending_h++;
+            if (app->pending_h < app->max_h) app->pending_h++;
             break;
         case KEY_SPACE:
             app->pending_wrap = !app->pending_wrap; /* finite <-> toroidal */
@@ -529,14 +556,46 @@ static int clamp_dim(int v, int lo, int hi) {
     return v;
 }
 
+/* Compute the largest board (cells) that fits the current terminal, bounded by
+   the absolute safety caps. Falls back to the caps if the size is unavailable
+   (e.g. not a terminal). */
+static void fit_limits(int *max_w, int *max_h) {
+    int cols, rows;
+    if (terminal_size(&cols, &rows)) {
+        *max_w = clamp_dim((cols - GRID_H_OVERHEAD) / 2, MIN_DIM, HARD_MAX_W);
+        *max_h = clamp_dim(rows - GRID_V_OVERHEAD, MIN_DIM, HARD_MAX_H);
+    } else {
+        *max_w = HARD_MAX_W;
+        *max_h = HARD_MAX_H;
+    }
+}
+
+/* React to a terminal resize: recompute the fit limits and, if the board no
+   longer fits, shrink it to fit (keeping pending canvas values in bounds). */
+static void handle_winch(App *app) {
+    fit_limits(&app->max_w, &app->max_h);
+
+    int nw = app->cur->width  > app->max_w ? app->max_w : app->cur->width;
+    int nh = app->cur->height > app->max_h ? app->max_h : app->cur->height;
+    if (nw != app->cur->width || nh != app->cur->height) {
+        if (!resize_boards(app, nw, nh)) {
+            app->running = false; /* allocation failed: bail out */
+            return;
+        }
+        persist_settings(app);
+    }
+    if (app->pending_w > app->max_w) app->pending_w = app->max_w;
+    if (app->pending_h > app->max_h) app->pending_h = app->max_h;
+}
+
 int main(int argc, char **argv) {
     /* Start from persisted settings (or built-in defaults on first run), then
        let command-line options override for this run. */
     Settings settings;
     settings_defaults(&settings);
     bool settings_existed = settings_load(&settings);
-    settings.width = clamp_dim(settings.width, MIN_DIM, MAX_W);
-    settings.height = clamp_dim(settings.height, MIN_DIM, MAX_H);
+    settings.width = clamp_dim(settings.width, MIN_DIM, HARD_MAX_W);
+    settings.height = clamp_dim(settings.height, MIN_DIM, HARD_MAX_H);
 
     Options opt = {
         .width = settings.width, .height = settings.height,
@@ -549,10 +608,13 @@ int main(int argc, char **argv) {
         return pr > 0 ? 0 : 1;
     }
 
-    /* Fold the effective (CLI-overridden) parameters back into settings and, on
-       first run, create the settings file so it exists for next time. */
-    settings.width = clamp_dim(opt.width, MIN_DIM, MAX_W);
-    settings.height = clamp_dim(opt.height, MIN_DIM, MAX_H);
+    /* Clamp the board to what fits the terminal now, fold the effective
+       (CLI-overridden) parameters back into settings, and on first run create
+       the settings file so it exists for next time. */
+    int max_w, max_h;
+    fit_limits(&max_w, &max_h);
+    settings.width = clamp_dim(opt.width, MIN_DIM, max_w);
+    settings.height = clamp_dim(opt.height, MIN_DIM, max_h);
     settings.wrap = opt.wrap;
     settings.delay_ms = opt.delay_ms;
     settings.density = opt.density;
@@ -577,6 +639,8 @@ int main(int argc, char **argv) {
     app.pending_h = opt.height;
     app.wrap = opt.wrap;
     app.pending_wrap = opt.wrap;
+    app.max_w = max_w;
+    app.max_h = max_h;
     app.settings = &settings;
 
     if (!board_init(&app.initial, opt.width, opt.height) ||
@@ -593,7 +657,15 @@ int main(int argc, char **argv) {
         return 1;
     }
     atexit(terminal_restore);
-    signal(SIGTERM, (void (*)(int))terminal_restore);
+    /* Restore the terminal on termination, and refit on window resize. No
+       SA_RESTART on SIGWINCH so it interrupts poll() and wakes the loop. */
+    struct sigaction sa_term = {0};
+    sa_term.sa_handler = on_term;
+    sigaction(SIGTERM, &sa_term, NULL);
+    sigaction(SIGHUP, &sa_term, NULL);
+    struct sigaction sa_winch = {0};
+    sa_winch.sa_handler = on_winch;
+    sigaction(SIGWINCH, &sa_winch, NULL);
 
     if (!build_initial(&app.initial, &opt)) {
         board_free(&app.initial);
@@ -618,6 +690,13 @@ int main(int argc, char **argv) {
             timeout = -1;
         }
         Key key = terminal_read_key(timeout);
+
+        /* A window resize (SIGWINCH interrupts the poll above) refits the board
+           before we redraw. */
+        if (g_resized) {
+            g_resized = 0;
+            handle_winch(&app);
+        }
 
         if (app.mode == UI_EDIT) {
             /* Toggle the blink on timeout; keep the marker solid while the user
