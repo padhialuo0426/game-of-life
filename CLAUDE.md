@@ -12,13 +12,11 @@ it **requires a sixel-capable terminal** (iTerm2, Konsole, WezTerm, foot,
 `xterm -ti vt340`, …). The default macOS Terminal.app is NOT supported and the
 program exits with a message on startup if sixel isn't detected.
 
-Three world types: **Finite** (default), **Toroidal** (`--wrap`), **Infinite**
-(`--infinite`, unbounded sparse hash-set world with a pannable/zoomable viewport).
-
-> Direction decided this session: the product is heading toward a **"true
-> infinite sandbox"**. The user does NOT need wrap/wall dynamics. Plan is: polish
-> the infinite world (mouse pan + wheel zoom) first, and once that feels good,
-> **remove the Toroidal and Finite world types** to simplify. See "Next steps".
+**Single world type: an unbounded ("infinite") sandbox** — a sparse hash-set of
+live cells with a pannable/zoomable viewport. There is no Finite or Toroidal
+world any more, and no Canvas mode (both removed 2026-07-06 on Fedora; the product
+direction was always the "true infinite sandbox"). The world is unbounded; `-w/-h`
+now only size the seed region a random/loaded pattern starts in.
 
 ## Build / run / install
 
@@ -26,7 +24,7 @@ Three world types: **Finite** (default), **Toroidal** (`--wrap`), **Infinite**
 cmake --preset release
 cmake --build --preset release          # -> build/release/game-of-life
 cmake --install build/release           # -> ~/.local/bin/game-of-life (+ default.cells to ~/.config)
-game-of-life --infinite                 # jump straight into the infinite world
+game-of-life                            # the sandbox (no flags needed)
 game-of-life --help
 ```
 
@@ -38,20 +36,35 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Source layout
 
-- `src/board.{c,h}` — dense finite/toroidal engine (double-buffered `Board`).
-- `src/sparse.{c,h}` — unbounded infinite engine: open-addressing hash set of live
-  cells (SplitMix64 hash, backward-shift deletion). `sparse_step` tallies neighbours.
-- `src/sixel.{c,h}` — encodes a `Board` to a sixel bitmap (RLE, per-cell blocks,
-  optional grid lines, cursor outline). Palette: dead/alive/grid/cursor.
+- `src/sparse.{c,h}` — the world engine: open-addressing hash set of live cells
+  (SplitMix64 hash, backward-shift deletion). `sparse_step` tallies neighbours;
+  `sparse_query(x0,y0,x1,y1,fn)` iterates the live cells in a rectangle (render).
+- `src/sixel.{c,h}` — sixel bitmap encoder. Incremental `SixelCanvas`
+  (`new/set_alive/set_cursor/encode/free`) plotted straight from the live-cell set;
+  `sixel_render_board` is a thin Board wrapper on top. Palette: dead/alive/grid/cursor.
+- `src/board.{c,h}` — dense `Board`, now used only as a transient seed buffer to
+  lay out the initial random/`.cells` pattern before handing it to the sparse
+  world (`seed_from_board`). Not on the render/step hot path any more.
 - `src/terminal.{c,h}` — raw mode, key + SGR-mouse decoding, sixel detection
   (Primary DA query), alt-screen + mouse enable/disable.
 - `src/config.{c,h}` — load `.cells` plaintext patterns (centered into a board).
 - `src/settings.{c,h}` — JSON-ish persisted settings in `~/.config/game-of-life/settings.json`.
-- `src/main.c` — UI state machine (Normal/Edit/Canvas × Finite/Toroidal/Infinite),
-  render loop, input handling, mouse pan/zoom.
+- `src/main.c` — UI state machine (Normal/Edit only), render loop, input handling,
+  mouse pan/zoom, recenter/follow.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Collapse to a pure infinite sandbox.** Removed the Finite and
+  Toroidal world types, the `WorldType` enum, the dense stepping path, Canvas
+  mode (the `BTN_CANVAS` button, `handle_canvas`/`canvas_apply`, resize/conversion
+  helpers `resize_boards`/`sparse_to_dense`/`dense_to_sparse`), the `--wrap` /
+  `--infinite` flags, and `fit_limits`/`handle_winch` board reallocation. `main.c`
+  is now a two-mode (Normal/Edit) UI over the sparse world only; the initial
+  pattern is laid out in a transient `Board` and handed off via `seed_from_board`.
+  Buttons: **Start Pause Step Reset Edit** (5, no Canvas).
+- **(Fedora) Recenter + follow.** `c` recentres the camera on the live cells'
+  bounding box; `f` toggles a follow mode that recentres every generation. Status
+  line shows `Follow: on/off`.
 - **(Fedora machine) Infinite world: render directly from the sparse set.**
   Was next-step #4. `prepare_view` used to snapshot the whole viewport into a
   dense `Board` with one `sparse_get` per viewport cell (O(viewport) hash lookups
@@ -153,41 +166,29 @@ marked DONE. When you pick one up, update this list.
 ### Done / standing advice
 - ~~Verify Fedora + Konsole~~ **DONE (2026-07-06)** — see "THE OPEN BUG" note.
 - ~~Direct sparse render (old perf item #4)~~ **DONE (2026-07-06)** — see changes list.
+- ~~Tier 1 · Recenter / follow~~ **DONE (2026-07-06)** — `c` centres, `f` follows.
+- ~~Tier 2 · Collapse to a pure infinite sandbox~~ **DONE (2026-07-06)** — Finite/
+  Toroidal + Canvas removed; see changes list.
 - **Advice to the iTerm2 user (not code):** update iTerm2 to ≥ 3.7.0beta1 — the
   actual fix for the image-retention memory blow-up.
 
-### Tier 1 — quick wins, biggest jump in "playability" (do first)
-1. **Recenter / follow the pattern.** The #1 infinite-world pain: a glider drifts
-   off and you lose it. Add a key that jumps the camera to the live cells'
-   **bounding-box centre** (`sparse_bounds` already exists — near-zero cost), plus
-   a toggleable **follow mode** that recentres every generation so you can watch a
-   spaceship travel. High value, small code. **Best value/effort — recommended first.**
-2. **Runtime speed control.** `delay_ms` is currently fixed at launch (`-d` only).
+### Tier 1 — quick wins (next up)
+1. **Runtime speed control.** `delay_ms` is currently fixed at launch (`-d` only).
    Add `+`/`-` (or `[`/`]`) to change it live, with the current speed on the status
-   line. Small code; essential for actually watching evolution.
+   line. Small code; essential for actually watching evolution. **Recommended next.**
 
-### Tier 2 — structural, the agreed direction
-3. **Collapse to a pure infinite sandbox: remove Toroidal + Finite worlds.**
-   Precondition ("infinite feels good") is now met. Deletes: dense-engine stepping
-   for bounded worlds, `WorldType` cycling, `resize_boards`, dense↔sparse
-   conversions, and a lot of branching. Note **Canvas mode becomes vestigial**
-   (an infinite world has no "board size" — canvas already shows Width/Height as
-   `--`), so simplify or remove Canvas too. Keep `Board` only as a render helper
-   if still needed. Medium effort; it's subtraction, not new capability — hence
-   ranked after the two Tier-1 wins, but it is the standing product direction.
-
-### Tier 3 — nice to have
-4. **Large-pattern save/load (RLE).** Real sandbox persistence: load the community
+### Tier 2 — nice to have
+2. **Large-pattern save/load (RLE).** Real sandbox persistence: load the community
    -standard `.rle` format (guns, spaceships — `.cells` is inefficient for big
    patterns) and save the current world back out. High value, **largest effort**
    (new parser + writer).
-5. **Clear-to-empty action.** One key to blank the world and draw from scratch
+3. **Clear-to-empty action.** One key to blank the world and draw from scratch
    (`sparse_clear` already exists). Tiny.
-6. **Keyboard zoom (`+`/`-`).** Zoom without a mouse. Tiny. (Mind the collision if
-   `+`/`-` is taken by speed control in item 2 — pick distinct keys.)
+4. **Keyboard zoom (`+`/`-`).** Zoom without a mouse. Tiny. (Mind the collision if
+   `+`/`-` is taken by speed control in Tier-1 item 1 — pick distinct keys.)
 
-### Tier 4 — perf, only if it actually bites
-7. **Encode sixel directly from the live-cell set.** Removes the residual O(pixels)
+### Tier 3 — perf, only if it actually bites
+5. **Encode sixel directly from the live-cell set.** Removes the residual O(pixels)
    encode cost at huge screen / 1px zoom (~1.7 ms/frame today). Only worth doing if
    big-screen encode ever becomes the bottleneck; the direct-render change already
    killed the O(viewport) hash-lookup cost that was the real problem.
@@ -195,6 +196,9 @@ marked DONE. When you pick one up, update this list.
 ## Gotchas / constraints for future work
 
 - **Keep the build warning-clean** under `-Wall -Wextra -Wpedantic`.
+- **One world only (unbounded/sparse).** Don't reintroduce Finite/Toroidal, a
+  `WorldType`, or Canvas mode — the product is the infinite sandbox. `Board` is a
+  transient seed buffer, not the sim state.
 - **Sixel is mandatory**: don't reintroduce a text renderer or assume a char grid.
 - **Alt screen**: on exit, do NOT clear the user's main screen/scrollback yourself
   — leaving the alt screen (`terminal_restore`) restores it. Don't reintroduce

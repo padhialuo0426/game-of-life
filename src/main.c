@@ -36,35 +36,29 @@
 #define CLR_EOL          "\033[K"
 
 #define MIN_DIM 3
-/* Absolute safety caps (bound memory even on an absurdly large terminal). The
-   effective per-run maximum is the smaller value that fits the terminal; see
-   fit_limits(). */
+/* Absolute safety caps for the initial seed region (a random/imported pattern
+   is laid out in this box before it is handed to the unbounded world). The
+   world itself is unbounded thereafter. */
 #define HARD_MAX_W 1000
 #define HARD_MAX_H 1000
 #define BLINK_MS 400
 #define MAX_DELAY_MS 3600000 /* 1 hour; keeps the poll timeout within int */
 
-/* Sixel (real-pixel) rendering. When the terminal supports sixel graphics the
-   board is drawn as a bitmap instead of text cells, so its size is limited by
-   pixels rather than by the character grid. */
+/* Sixel (real-pixel) rendering. The board is drawn as a bitmap instead of text
+   cells, so its size is limited by pixels rather than by the character grid. */
 #define SIXEL_UI_ROWS 6   /* char rows reserved below the image for the UI */
-#define SIXEL_CELL_MAX 20 /* max pixels per cell (keeps small boards sane) */
+#define SIXEL_CELL_MAX 20 /* max pixels per cell (keeps small views sane) */
 
-/* World topology. Finite and Toroidal are bounded (dense engine); Infinite is
-   unbounded (sparse hash-set engine) with a pannable viewport. */
-typedef enum { WORLD_FINITE, WORLD_TOROIDAL, WORLD_INFINITE } WorldType;
-
-/* Pixels per cell for the infinite-world viewport in sixel mode. The viewport is
-   sized so cells render around this size; the mouse wheel changes it to zoom
-   (smaller = more cells visible). INFINITE_CELL_PX is the default; the range is
-   capped at SIXEL_CELL_MAX so the renderer's own cap never truncates the view. */
+/* Pixels per cell for the viewport in sixel mode. The viewport is sized so cells
+   render around this size; the mouse wheel changes it to zoom (smaller = more
+   cells visible). INFINITE_CELL_PX is the default. */
 #define INFINITE_CELL_PX 10
 #define INFINITE_CELL_MIN 1  /* 1 device pixel per cell — the real-pixel floor */
 #define INFINITE_CELL_MAX SIXEL_CELL_MAX
 #define ZOOM_STEP 2 /* pixels per wheel notch */
 
 /* Top-level interaction mode. */
-typedef enum { UI_NORMAL, UI_EDIT, UI_CANVAS } UiMode;
+typedef enum { UI_NORMAL, UI_EDIT } UiMode;
 
 /* Simulation sub-state, meaningful in UI_NORMAL. */
 typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
@@ -72,54 +66,43 @@ typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
 /* Bottom button bar. Order matters: it is the left-to-right layout. There is no
    Quit button — 'q' (or Ctrl-C) quits from any screen. */
 typedef enum {
-    BTN_START, BTN_PAUSE, BTN_STEP, BTN_RESET, BTN_EDIT, BTN_CANVAS,
+    BTN_START, BTN_PAUSE, BTN_STEP, BTN_RESET, BTN_EDIT,
     BTN_COUNT
 } Button;
 
 static const char *const BUTTON_LABELS[BTN_COUNT] = {
-    " Start ", " Pause ", " Step ", " Reset ", " Edit ", " Canvas "};
+    " Start ", " Pause ", " Step ", " Reset ", " Edit "};
 
 typedef struct {
-    Board initial; /* starting config, restored by Stop */
-    Board a, b;    /* double-buffered simulation boards */
-    Board *cur, *next;
-
     UiMode mode;
     SimState sim;
     long gen;
     int selected;               /* button index (UI_NORMAL) */
-    int cursor_x, cursor_y;     /* grid/world cursor (UI_EDIT) */
+    int cursor_x, cursor_y;     /* world cursor (UI_EDIT) */
     bool blink_on;              /* cursor blink phase (UI_EDIT) */
-    int pending_w, pending_h;   /* target size (UI_CANVAS) */
-    WorldType pending_world;    /* target world type (UI_CANVAS) */
-    int canvas_field;           /* focused numeric field: 0=width, 1=height */
-    bool canvas_editing;        /* field has been typed into since it got focus */
-    WorldType world;            /* current world type */
-    int max_w, max_h;           /* largest board that fits the terminal now */
 
     int sx_last_w, sx_last_h;   /* last sixel image pixel size (clear on change) */
     uint64_t sx_last_hash;      /* hash of the last emitted image bytes */
     bool sx_drawn;              /* an image has been emitted at least once */
 
-    /* Infinite world (WORLD_INFINITE): unbounded sparse state + a pannable
-       viewport rendered straight from the live-cell set (no dense snapshot). */
+    /* The unbounded world: a sparse hash-set of live cells with a pannable,
+       zoomable viewport rendered straight from the live-cell set. */
     SparseWorld *sparse;        /* live cells */
-    SparseWorld *sparse_initial;/* config restored by Stop */
+    SparseWorld *sparse_initial;/* config restored by Reset */
     int cam_x, cam_y;           /* viewport top-left in world coordinates */
     int view_w, view_h;         /* current viewport size in cells */
     int infinite_cell_px;       /* pixels per cell (mouse-wheel zoom level) */
     bool follow;                /* auto-recentre the camera on the pattern */
 
-    /* Left-drag panning (WORLD_INFINITE). While the left button is held, the
-       camera is recomputed from the anchor captured on press so the grabbed
-       point stays under the cursor. */
+    /* Left-drag panning. While the left button is held, the camera is recomputed
+       from the anchor captured on press so the grabbed point stays under the
+       cursor. */
     bool dragging;
     int drag_mx, drag_my;       /* mouse cell where the drag started */
     int drag_cam_x, drag_cam_y; /* camera position when the drag started */
 
     long delay_ms;
     bool running;
-    Settings *settings; /* persisted on change (canvas apply) */
 } App;
 
 static const char *sim_label(SimState s) {
@@ -130,20 +113,8 @@ static const char *sim_label(SimState s) {
     }
 }
 
-static const char *world_label(WorldType w) {
-    switch (w) {
-        case WORLD_TOROIDAL: return "Toroidal";
-        case WORLD_INFINITE: return "Infinite";
-        default:             return "Finite";
-    }
-}
-
-/* Cycle through the three world types (used by the Space key in canvas mode). */
-static WorldType world_next(WorldType w) {
-    return (WorldType)(((int)w + 1) % 3);
-}
-
-/* Set by the SIGWINCH handler; the main loop notices it and refits the board. */
+/* Set by the SIGWINCH handler; the main loop notices it and redraws (the
+   viewport is recomputed every frame, so nothing else is needed). */
 static volatile sig_atomic_t g_resized = 0;
 
 static void on_winch(int sig) {
@@ -161,6 +132,13 @@ static void on_term(int sig) {
     _Exit(128 + sig);
 }
 
+/* Clamp a dimension into the supported range. */
+static int clamp_dim(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
 /* ------------------------------------------------------------------ */
 /* Command-line options                                               */
 /* ------------------------------------------------------------------ */
@@ -172,34 +150,30 @@ typedef struct {
     double density;
     unsigned int seed;
     bool seed_set;
-    WorldType world;
     const char *config_path;
 } Options;
 
 static void print_usage(const char *prog) {
-    printf("Conway's Game of Life (interactive)\n\n");
+    printf("Conway's Game of Life — unbounded sandbox (interactive)\n\n");
     printf("Usage: %s [options]\n\n", prog);
     printf("Options:\n");
-    printf("  -w, --width N     board width in cells   (default 30)\n");
-    printf("  -h, --height N    board height in cells  (default 20)\n");
+    printf("  -w, --width N     seed region width in cells   (default 30)\n");
+    printf("  -h, --height N    seed region height in cells  (default 20)\n");
+    printf("                    (the box a random/loaded pattern starts in; the\n");
+    printf("                     world itself is unbounded)\n");
     printf("  -d, --delay MS    delay between frames in ms (default 120)\n");
     printf("  -p, --density F   random initial density 0..1 (default 0.25)\n");
     printf("  -s, --seed N      random seed (default: time-based)\n");
     printf("  -f, --file PATH   load initial config from a pattern file\n");
     printf("                    (default: ~/.config/game-of-life/default.cells if\n");
     printf("                     present, otherwise a random board)\n");
-    printf("      --wrap        start in toroidal (wrap-around) topology\n");
-    printf("                    (default: finite grid; edges kill escaping cells)\n");
-    printf("      --infinite    start in the unbounded (sparse) world\n");
     printf("      --help        show this help and exit\n\n");
-    printf("Settings such as board size and world type are remembered between\n");
-    printf("runs in ~/.config/game-of-life/settings.json.\n\n");
-    printf("Buttons: Start Pause Step Reset Edit Canvas   (q quits from anywhere)\n");
-    printf("Normal:  Tab/Left/Right select   Space/Enter activate   q quit\n");
-    printf("         (Infinite world: drag to pan, mouse wheel to zoom)\n");
+    printf("Settings such as the seed-region size are remembered between runs in\n");
+    printf("~/.config/game-of-life/settings.json.\n\n");
+    printf("Buttons: Start Pause Step Reset Edit   (q quits from anywhere)\n");
+    printf("Normal:  drag pan   wheel zoom   c center   f follow   Tab select\n");
+    printf("         Space/Enter activate   q quit\n");
     printf("Edit:    arrows move cursor   Space toggle cell   Tab/Esc leave\n");
-    printf("Canvas:  type digits to set size   Up/Down field   Left/Right +/-1\n");
-    printf("         Space cycles Finite/Toroidal/Infinite   Enter apply   Esc cancel\n");
 }
 
 static bool parse_long(int argc, char **argv, int *i, long *out) {
@@ -249,10 +223,6 @@ static int parse_args(int argc, char **argv, Options *opt) {
         } else if (strcmp(a, "-f") == 0 || strcmp(a, "--file") == 0) {
             if (i + 1 >= argc) goto bad;
             opt->config_path = argv[++i];
-        } else if (strcmp(a, "--wrap") == 0) {
-            opt->world = WORLD_TOROIDAL;
-        } else if (strcmp(a, "--infinite") == 0) {
-            opt->world = WORLD_INFINITE;
         } else {
             fprintf(stderr, "Unknown argument: %s\nTry '%s --help'.\n", a, argv[0]);
             return -1;
@@ -281,11 +251,9 @@ static void appendf(char *buf, size_t cap, size_t *n, const char *fmt, ...) {
     }
 }
 
-static int clamp_dim(int v, int lo, int hi); /* defined below */
-
-/* Size of the infinite-world viewport in cells, chosen to fill the terminal at
-   a comfortable cell size (you pan to see beyond it). Mirrors the reservations
-   made by the renderers so the image plus controls fit without scrolling. */
+/* Size of the viewport in cells, chosen to fill the terminal at the current zoom
+   (you pan to see beyond it). Mirrors the reservations made by the renderer so
+   the image plus controls fit without scrolling. */
 static void infinite_viewport(const App *app, int *vw, int *vh) {
     const int px = app->infinite_cell_px;
     int cols, rows, xpx, ypx;
@@ -298,8 +266,8 @@ static void infinite_viewport(const App *app, int *vw, int *vh) {
                viewport cap is the terminal's own detected pixel size: vw fills
                the width at any zoom on any display (Retina, 4K, 8K, …) with no
                fixed limit. avail_w/avail_h come from the ioctl ws_xpixel/ypixel
-               (u16-bounded); an over-large snapshot simply fails to allocate and
-               prepare_view degrades gracefully rather than capping zoom. */
+               (u16-bounded); an over-large image simply fails to allocate and the
+               frame is skipped rather than capping zoom. */
             *vw = clamp_dim(avail_w / px, MIN_DIM, avail_w);
             *vh = clamp_dim(avail_h / px, MIN_DIM, avail_h);
             return;
@@ -309,9 +277,9 @@ static void infinite_viewport(const App *app, int *vw, int *vh) {
     *vh = 20;
 }
 
-/* Plot each live cell of the infinite world onto the sixel canvas, translating
-   world coordinates to viewport-local cells. Passed to sparse_query so only the
-   live population is touched, never every cell of the (possibly huge) viewport. */
+/* Plot each live cell onto the sixel canvas, translating world coordinates to
+   viewport-local cells. Passed to sparse_query so only the live population is
+   touched, never every cell of the (possibly huge) viewport. */
 typedef struct {
     SixelCanvas *canvas;
     int cam_x, cam_y;
@@ -323,55 +291,18 @@ static void plot_cell_cb(int x, int y, void *ud) {
 }
 
 /* Append the controls block below the sixel image: status line, a blank line,
-   the button bar, a blank line, and the hint line. Occupies five text rows (plus
-   the caller's clear-below). `board` is the board being rendered. */
-static void append_controls(const App *app, const Board *board,
-                            char *buf, size_t cap, size_t *n) {
-    const bool inf = (app->world == WORLD_INFINITE);
-
-    switch (app->mode) {
-        case UI_EDIT:
-            if (inf) {
-                appendf(buf, cap, n,
-                        " EDIT   Cursor: (%d,%d)   Live: %zu   World: Infinite" EOL EOL,
-                        app->cursor_x, app->cursor_y, sparse_count(app->sparse));
-            } else {
-                appendf(buf, cap, n, " EDIT   Cursor: (%d,%d)   Size: %dx%d" EOL EOL,
-                        app->cursor_x, app->cursor_y, board->width, board->height);
-            }
-            break;
-        case UI_CANVAS:
-            appendf(buf, cap, n, " CANVAS   Width: ");
-            if (app->pending_world == WORLD_INFINITE) {
-                appendf(buf, cap, n, "--   Height: --");
-            } else {
-                if (app->canvas_field == 0)
-                    appendf(buf, cap, n, ANSI_REVERSE "%d" ANSI_RESET, app->pending_w);
-                else
-                    appendf(buf, cap, n, "%d", app->pending_w);
-                appendf(buf, cap, n, "   Height: ");
-                if (app->canvas_field == 1)
-                    appendf(buf, cap, n, ANSI_REVERSE "%d" ANSI_RESET, app->pending_h);
-                else
-                    appendf(buf, cap, n, "%d", app->pending_h);
-            }
-            appendf(buf, cap, n, "   World: %s" EOL EOL,
-                    world_label(app->pending_world));
-            break;
-        default:
-            if (inf) {
-                appendf(buf, cap, n,
-                        " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Follow: %s" EOL EOL,
-                        sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
-                        sparse_count(app->sparse), app->infinite_cell_px,
-                        app->follow ? "on" : "off");
-            } else {
-                appendf(buf, cap, n,
-                        " State: %s   Gen: %ld   Size: %dx%d   World: %s" EOL EOL,
-                        sim_label(app->sim), app->gen, board->width, board->height,
-                        world_label(app->world));
-            }
-            break;
+   the button bar, a blank line, and the hint line. */
+static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
+    if (app->mode == UI_EDIT) {
+        appendf(buf, cap, n,
+                " EDIT   Cursor: (%d,%d)   Live: %zu" EOL EOL,
+                app->cursor_x, app->cursor_y, sparse_count(app->sparse));
+    } else {
+        appendf(buf, cap, n,
+                " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Follow: %s" EOL EOL,
+                sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
+                sparse_count(app->sparse), app->infinite_cell_px,
+                app->follow ? "on" : "off");
     }
 
     /* Button bar; selection is highlighted only in normal mode. */
@@ -388,25 +319,12 @@ static void append_controls(const App *app, const Board *board,
 
     /* The hint is the last line of the frame, so it ends with CLR_EOL (no
        newline) to avoid scrolling the screen on the bottom row. */
-    switch (app->mode) {
-        case UI_EDIT:
-            appendf(buf, cap, n,
-                    " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
-            break;
-        case UI_CANVAS:
-            appendf(buf, cap, n,
-                    " Type digits to set size   Up/Down field   Left/Right +/-1   "
-                    "Space world   Enter apply   Esc cancel" CLR_EOL);
-            break;
-        default:
-            if (inf) {
-                appendf(buf, cap, n,
-                        " Drag pan   Wheel zoom   c center   f follow   Tab select   Space/Enter activate   q quit" CLR_EOL);
-            } else {
-                appendf(buf, cap, n,
-                        " Tab/Left/Right select   Space/Enter activate   q quit" CLR_EOL);
-            }
-            break;
+    if (app->mode == UI_EDIT) {
+        appendf(buf, cap, n,
+                " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
+    } else {
+        appendf(buf, cap, n,
+                " Drag pan   Wheel zoom   c center   f follow   Tab select   Space/Enter activate   q quit" CLR_EOL);
     }
 }
 
@@ -424,11 +342,9 @@ static uint64_t fnv1a(const char *data, size_t len) {
 /* Emit an already-encoded sixel image plus the controls below it. Re-emits the
    image only when it actually changed since the last frame (see the dedup note),
    so idle frames cost nothing and do not pile images into terminals that retain
-   them (e.g. older iTerm2). `ctl_board` is passed through to append_controls for
-   the size readout; it may be NULL in the infinite world, which reads no board.
-   Takes ownership of `img` and frees it. */
+   them (e.g. older iTerm2). Takes ownership of `img` and frees it. */
 static void emit_frame(App *app, char *img, size_t img_len,
-                       int img_w, int img_h, int cch, const Board *ctl_board) {
+                       int img_w, int img_h, int cch) {
     const int img_rows = (img_h + cch - 1) / cch; /* char rows the image spans */
 
     const uint64_t hash = fnv1a(img, img_len);
@@ -455,57 +371,19 @@ static void emit_frame(App *app, char *img, size_t img_len,
     char ctl[2048];
     size_t n = 0;
     appendf(ctl, sizeof(ctl), &n, "\033[%d;1H", img_rows + 1);
-    append_controls(app, ctl_board, ctl, sizeof(ctl), &n);
+    append_controls(app, ctl, sizeof(ctl), &n);
     appendf(ctl, sizeof(ctl), &n, ANSI_CLR_BELOW);
     fwrite(ctl, 1, n, stdout);
 
     fflush(stdout);
 }
 
-/* Sixel renderer for the bounded worlds: draw the board as a bitmap (one cell =
-   cell_px pixels, chosen to fill the available space), then the controls below
-   it. Returns false if the layout cannot be computed (no pixel size, board too
-   tall, etc.); the caller then simply skips the frame. */
-static bool render_sixel(App *app, const Board *board, int cx, int cy) {
-    int cols, rows, xpx, ypx;
-    if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
-        return false;
-    }
-    const int cch = ypx / rows; /* pixel height of one character cell */
-    const int ccw = xpx / cols; /* pixel width  of one character cell */
-    if (cch <= 0 || ccw <= 0) return false;
-
-    const int avail_w = xpx - ccw;                 /* ~1 column right margin */
-    const int avail_h = ypx - SIXEL_UI_ROWS * cch; /* rows reserved for the UI */
-    if (avail_w < board->width || avail_h < board->height) {
-        return false; /* cannot fit even one pixel per cell */
-    }
-
-    /* Zoom to fit: largest square cell that fits both dimensions. */
-    int cell = avail_w / board->width;
-    int ch = avail_h / board->height;
-    if (ch < cell) cell = ch;
-    if (cell < 1) cell = 1;
-    if (cell > SIXEL_CELL_MAX) cell = SIXEL_CELL_MAX;
-
-    const int img_w = board->width * cell;
-    const int img_h = board->height * cell;
-
-    const bool con = (cx >= 0) && app->blink_on;
-
-    size_t img_len = 0;
-    char *img = sixel_render_board(board, cell, cx, cy, con, &img_len);
-    if (img == NULL) return false;
-
-    emit_frame(app, img, img_len, img_w, img_h, cch, board);
-    return true;
-}
-
-/* Sixel renderer for the infinite world: build the image straight from the
-   sparse live-cell set, plotting only the O(population) cells that fall inside
-   the viewport instead of probing every one of its (up to millions of) cells.
-   The viewport size and zoom come from the pannable camera, not zoom-to-fit. */
-static bool render_infinite(App *app) {
+/* Render the world: build the image straight from the sparse live-cell set,
+   plotting only the O(population) cells that fall inside the viewport instead of
+   probing every one of its (up to millions of) cells. Returns false if the
+   layout cannot be computed (no pixel size, allocation failed); the caller then
+   simply skips the frame. */
+static bool render(App *app) {
     int cols, rows, xpx, ypx;
     if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
         return false;
@@ -538,137 +416,48 @@ static bool render_infinite(App *app) {
     sixel_canvas_free(canvas);
     if (img == NULL) return false;
 
-    emit_frame(app, img, img_len, vw * cell, vh * cell, cch, NULL);
+    emit_frame(app, img, img_len, vw * cell, vh * cell, cch);
     return true;
 }
 
-static void render(App *app) {
-    /* sixel is required; a failed frame is simply skipped. */
-    if (app->world == WORLD_INFINITE) {
-        render_infinite(app);
-    } else {
-        app->view_w = app->cur->width;
-        app->view_h = app->cur->height;
-        const int cx = (app->mode == UI_EDIT) ? app->cursor_x : -1;
-        const int cy = (app->mode == UI_EDIT) ? app->cursor_y : -1;
-        render_sixel(app, app->cur, cx, cy);
-    }
-}
-
 /* ------------------------------------------------------------------ */
-/* Board lifecycle helpers                                            */
+/* World helpers                                                      */
 /* ------------------------------------------------------------------ */
 
 static void step_once(App *app) {
-    if (app->world == WORLD_INFINITE) {
-        sparse_step(app->sparse);
-        app->gen++;
-        return;
-    }
-    board_step(app->cur, app->next, app->world == WORLD_TOROIDAL);
-    Board *tmp = app->cur;
-    app->cur = app->next;
-    app->next = tmp;
+    sparse_step(app->sparse);
     app->gen++;
 }
 
-/* Sync the persisted settings with the current board size / world type and
-   write them out, so the next run starts from the same configuration. The
-   bounded size (app->cur) is remembered even in the infinite world, so a later
-   switch back to Finite/Toroidal restores a sensible canvas. */
-static void persist_settings(App *app) {
-    if (app->settings == NULL) return;
-    app->settings->width = app->cur->width;
-    app->settings->height = app->cur->height;
-    app->settings->world = (int)app->world;
-    app->settings->wrap = (app->world == WORLD_TOROIDAL);
-    settings_save(app->settings); /* best effort; ignore failure */
-}
-
-/* Populate the sparse world from the current dense board (world coords match
-   board coords) and centre the viewport on it. Used when switching a bounded
-   world to the infinite one. */
-static void dense_to_sparse(App *app) {
+/* Seed the world from a dense board (world coordinates match board coordinates),
+   snapshot it as the restart config, and centre the viewport on it. */
+static void seed_from_board(App *app, const Board *b) {
     sparse_clear(app->sparse);
-    for (int y = 0; y < app->cur->height; y++) {
-        for (int x = 0; x < app->cur->width; x++) {
-            if (board_get(app->cur, x, y)) sparse_set(app->sparse, x, y, true);
+    for (int y = 0; y < b->height; y++) {
+        for (int x = 0; x < b->width; x++) {
+            if (board_get(b, x, y)) sparse_set(app->sparse, x, y, true);
         }
     }
     sparse_copy(app->sparse_initial, app->sparse);
+
     int vw, vh;
     infinite_viewport(app, &vw, &vh);
-    app->cam_x = app->cur->width / 2 - vw / 2;
-    app->cam_y = app->cur->height / 2 - vh / 2;
+    app->view_w = vw;
+    app->view_h = vh;
+    app->cam_x = b->width / 2 - vw / 2;
+    app->cam_y = b->height / 2 - vh / 2;
 }
 
-/* Snapshot the current viewport out of the sparse world into a fresh nw x nh
-   dense board and make it the initial config. Used when switching the infinite
-   world back to a bounded one (sized to the current viewport). Returns false on
-   allocation failure. */
-static bool sparse_to_dense(App *app, int nw, int nh) {
-    Board ni, na, nb;
-    if (!board_init(&ni, nw, nh)) return false;
-    if (!board_init(&na, nw, nh)) { board_free(&ni); return false; }
-    if (!board_init(&nb, nw, nh)) { board_free(&ni); board_free(&na); return false; }
-
-    for (int j = 0; j < nh; j++) {
-        for (int i = 0; i < nw; i++) {
-            if (sparse_get(app->sparse, app->cam_x + i, app->cam_y + j))
-                board_set(&ni, i, j, true);
-        }
-    }
-
-    board_free(&app->initial);
-    board_free(&app->a);
-    board_free(&app->b);
-    app->initial = ni;
-    app->a = na;
-    app->b = nb;
-    app->cur = &app->a;
-    app->next = &app->b;
-    board_copy(app->cur, &app->initial);
-    if (app->cursor_x >= nw) app->cursor_x = nw - 1;
-    if (app->cursor_y >= nh) app->cursor_y = nh - 1;
-    if (app->cursor_x < 0) app->cursor_x = 0;
-    if (app->cursor_y < 0) app->cursor_y = 0;
-    return true;
-}
-
-/* Resize all three boards to nw x nh, preserving the existing initial config
-   centered inside the new dimensions. Returns false on allocation failure. */
-static bool resize_boards(App *app, int nw, int nh) {
-    Board old = app->initial; /* borrows old.cells until we free it below */
-
-    Board ni;
-    if (!board_init(&ni, nw, nh)) {
-        return false;
-    }
-    int offx = (nw - old.width) / 2;
-    int offy = (nh - old.height) / 2;
-    for (int y = 0; y < old.height; y++) {
-        for (int x = 0; x < old.width; x++) {
-            board_set(&ni, offx + x, offy + y, board_get(&old, x, y));
-        }
-    }
-
-    board_free(&app->initial); /* frees old.cells */
-    board_free(&app->a);
-    board_free(&app->b);
-
-    app->initial = ni;
-    if (!board_init(&app->a, nw, nh) || !board_init(&app->b, nw, nh)) {
-        return false;
-    }
-    app->cur = &app->a;
-    app->next = &app->b;
-    board_copy(app->cur, &app->initial);
-    app->gen = 0;
-    app->sim = SIM_STOPPED;
-    /* Keep the edit cursor inside the new bounds. */
-    if (app->cursor_x >= nw) app->cursor_x = nw - 1;
-    if (app->cursor_y >= nh) app->cursor_y = nh - 1;
-    return true;
+/* Centre the viewport on the live cells' bounding box. No-op when the world is
+   empty. Uses the viewport size from the last rendered frame, which is current
+   except across a zoom/resize that has not been drawn yet. */
+static void recenter_camera(App *app) {
+    int minx, miny, maxx, maxy;
+    if (!sparse_bounds(app->sparse, &minx, &miny, &maxx, &maxy)) return;
+    const int mid_x = minx + (maxx - minx) / 2;
+    const int mid_y = miny + (maxy - miny) / 2;
+    app->cam_x = mid_x - app->view_w / 2;
+    app->cam_y = mid_y - app->view_h / 2;
 }
 
 /* ------------------------------------------------------------------ */
@@ -685,41 +474,28 @@ static void activate_button(App *app) {
             break;
         case BTN_STEP:
             step_once(app);
+            if (app->follow) recenter_camera(app);
             app->sim = SIM_PAUSED;
             break;
         case BTN_RESET:
             /* Reload the initial configuration (generation 0). */
             app->sim = SIM_STOPPED;
-            if (app->world == WORLD_INFINITE) {
-                sparse_copy(app->sparse, app->sparse_initial);
-            } else {
-                board_copy(app->cur, &app->initial);
-            }
+            sparse_copy(app->sparse, app->sparse_initial);
             app->gen = 0;
             break;
         case BTN_EDIT:
             app->mode = UI_EDIT;
             app->sim = SIM_STOPPED;
             app->blink_on = true;
-            if (app->world == WORLD_INFINITE) {
-                /* Start the cursor at the centre of the current view. */
-                app->cursor_x = app->cam_x + app->view_w / 2;
-                app->cursor_y = app->cam_y + app->view_h / 2;
-            }
-            break;
-        case BTN_CANVAS:
-            app->mode = UI_CANVAS;
-            app->pending_w = app->cur->width;
-            app->pending_h = app->cur->height;
-            app->pending_world = app->world;
-            app->canvas_field = 0;
-            app->canvas_editing = false;
+            /* Start the cursor at the centre of the current view. */
+            app->cursor_x = app->cam_x + app->view_w / 2;
+            app->cursor_y = app->cam_y + app->view_h / 2;
             break;
     }
 }
 
 /* Convert a delta measured in screen character cells into a delta in world
-   cells. The mouse reports character cells, while the sixel renderer draws
+   cells. The mouse reports character cells, while the renderer draws
    infinite_cell_px pixels per world cell, so scale through the pixel size of a
    character cell (character-cell pixels / world-cell pixels). */
 static void screen_delta_to_world(const App *app, int dcol, int drow,
@@ -737,9 +513,9 @@ static void screen_delta_to_world(const App *app, int dcol, int drow,
     *wdy = drow;
 }
 
-/* Mouse-wheel zoom of the infinite viewport, keeping the world point under the
-   cursor fixed so zoom feels centred there. dir = +1 zooms in (larger cells),
-   -1 zooms out. mx,my are the cursor's character-cell position. */
+/* Mouse-wheel zoom, keeping the world point under the cursor fixed so zoom feels
+   centred there. dir = +1 zooms in (larger cells), -1 zooms out. mx,my are the
+   cursor's character-cell position. */
 static void zoom_infinite(App *app, int dir, int mx, int my) {
     int old_px = app->infinite_cell_px;
     int new_px = clamp_dim(old_px + dir * ZOOM_STEP,
@@ -763,10 +539,9 @@ static void zoom_infinite(App *app, int dir, int mx, int my) {
     app->infinite_cell_px = new_px; /* no pixel size: zoom without re-anchoring */
 }
 
-/* Handle a mouse event in the infinite world: the wheel zooms (anchored on the
-   cursor), and the left button drags to pan (press captures an anchor;
-   drag-motion recomputes the camera from it so the grabbed point tracks the
-   cursor; release ends the drag). */
+/* Handle a mouse event: the wheel zooms (anchored on the cursor), and the left
+   button drags to pan (press captures an anchor; drag-motion recomputes the
+   camera from it so the grabbed point tracks the cursor; release ends the drag). */
 static void handle_mouse(App *app) {
     MouseEvent m = terminal_mouse();
     if (m.button == 64 || m.button == 65) { /* wheel up / down */
@@ -790,13 +565,11 @@ static void handle_mouse(App *app) {
     }
 }
 
-static void recenter_camera(App *app); /* defined below */
-
 static void handle_normal(App *app, Key key) {
-    /* In the infinite world the mouse pans (left-drag) and zooms (wheel); the
-       arrow keys always move the button selection (in every world). */
+    /* The mouse pans (left-drag) and zooms (wheel); the arrow keys move the
+       button selection. */
     if (key == KEY_MOUSE) {
-        if (app->world == WORLD_INFINITE) handle_mouse(app);
+        handle_mouse(app);
         return;
     }
 
@@ -804,7 +577,7 @@ static void handle_normal(App *app, Key key) {
         case KEY_NONE:
             if (app->sim == SIM_RUNNING) {
                 step_once(app);
-                if (app->world == WORLD_INFINITE && app->follow) recenter_camera(app);
+                if (app->follow) recenter_camera(app);
             }
             break;
         case KEY_TAB:
@@ -819,9 +592,9 @@ static void handle_normal(App *app, Key key) {
             activate_button(app);
             break;
         case KEY_OTHER:
-            /* Infinite world: 'c' recentres on the pattern once; 'f' toggles a
-               follow mode that recentres every generation. */
-            if (app->world == WORLD_INFINITE) {
+            /* 'c' recentres on the pattern once; 'f' toggles a follow mode that
+               recentres every generation. */
+            {
                 const int c = terminal_char();
                 if (c == 'c' || c == 'C') {
                     recenter_camera(app);
@@ -839,19 +612,7 @@ static void handle_normal(App *app, Key key) {
     }
 }
 
-/* Centre the viewport on the live cells' bounding box (infinite world). No-op
-   when the world is empty. Uses the viewport size from the last rendered frame,
-   which is current except across a zoom/resize that has not been drawn yet. */
-static void recenter_camera(App *app) {
-    int minx, miny, maxx, maxy;
-    if (!sparse_bounds(app->sparse, &minx, &miny, &maxx, &maxy)) return;
-    const int mid_x = minx + (maxx - minx) / 2;
-    const int mid_y = miny + (maxy - miny) / 2;
-    app->cam_x = mid_x - app->view_w / 2;
-    app->cam_y = mid_y - app->view_h / 2;
-}
-
-/* Pan the viewport so the (infinite-world) edit cursor stays visible. */
+/* Pan the viewport so the edit cursor stays visible. */
 static void follow_cursor(App *app) {
     if (app->cursor_x < app->cam_x) app->cam_x = app->cursor_x;
     else if (app->cursor_x >= app->cam_x + app->view_w)
@@ -862,58 +623,21 @@ static void follow_cursor(App *app) {
 }
 
 static void handle_edit(App *app, Key key) {
-    if (app->world == WORLD_INFINITE) {
-        switch (key) {
-            case KEY_LEFT:  app->cursor_x--; break;
-            case KEY_RIGHT: app->cursor_x++; break;
-            case KEY_UP:    app->cursor_y--; break;
-            case KEY_DOWN:  app->cursor_y++; break;
-            case KEY_SPACE:
-            case KEY_ENTER: {
-                bool alive = sparse_get(app->sparse, app->cursor_x, app->cursor_y);
-                sparse_set(app->sparse, app->cursor_x, app->cursor_y, !alive);
-                break;
-            }
-            case KEY_TAB:
-            case KEY_ESC:
-                sparse_copy(app->sparse_initial, app->sparse);
-                app->gen = 0;
-                app->sim = SIM_STOPPED;
-                app->mode = UI_NORMAL;
-                break;
-            case KEY_QUIT:
-                app->running = false;
-                break;
-            default:
-                break;
-        }
-        follow_cursor(app);
-        return;
-    }
-
     switch (key) {
-        case KEY_LEFT:
-            if (app->cursor_x > 0) app->cursor_x--;
-            break;
-        case KEY_RIGHT:
-            if (app->cursor_x < app->cur->width - 1) app->cursor_x++;
-            break;
-        case KEY_UP:
-            if (app->cursor_y > 0) app->cursor_y--;
-            break;
-        case KEY_DOWN:
-            if (app->cursor_y < app->cur->height - 1) app->cursor_y++;
-            break;
+        case KEY_LEFT:  app->cursor_x--; break;
+        case KEY_RIGHT: app->cursor_x++; break;
+        case KEY_UP:    app->cursor_y--; break;
+        case KEY_DOWN:  app->cursor_y++; break;
         case KEY_SPACE:
         case KEY_ENTER: {
-            bool alive = board_get(app->cur, app->cursor_x, app->cursor_y);
-            board_set(app->cur, app->cursor_x, app->cursor_y, !alive);
+            bool alive = sparse_get(app->sparse, app->cursor_x, app->cursor_y);
+            sparse_set(app->sparse, app->cursor_x, app->cursor_y, !alive);
             break;
         }
         case KEY_TAB:
         case KEY_ESC:
-            /* Leave edit mode; the edited board becomes the new initial. */
-            board_copy(&app->initial, app->cur);
+            /* Leave edit mode; the edited world becomes the new restart config. */
+            sparse_copy(app->sparse_initial, app->sparse);
             app->gen = 0;
             app->sim = SIM_STOPPED;
             app->mode = UI_NORMAL;
@@ -924,90 +648,15 @@ static void handle_edit(App *app, Key key) {
         default:
             break;
     }
+    follow_cursor(app);
 }
 
-/* Apply the pending canvas settings: resize/switch world type as needed. */
-static void canvas_apply(App *app) {
-    int nw = clamp_dim(app->pending_w, MIN_DIM, app->max_w);
-    int nh = clamp_dim(app->pending_h, MIN_DIM, app->max_h);
-    WorldType from = app->world, to = app->pending_world;
-    bool ok = true;
-
-    if (from != WORLD_INFINITE && to != WORLD_INFINITE) {
-        /* Bounded -> bounded: reallocate (and reset) only when the size
-           actually changed, so a pure topology switch keeps a running sim. */
-        if (nw != app->cur->width || nh != app->cur->height) {
-            ok = resize_boards(app, nw, nh);
-        }
-        app->world = to;
-    } else if (from != WORLD_INFINITE && to == WORLD_INFINITE) {
-        dense_to_sparse(app);
-        app->world = to;
-        app->gen = 0;
-        app->sim = SIM_STOPPED;
-    } else if (from == WORLD_INFINITE && to != WORLD_INFINITE) {
-        /* Infinite -> bounded: adopt the current viewport as the new canvas. */
-        int bw = clamp_dim(app->view_w, MIN_DIM, app->max_w);
-        int bh = clamp_dim(app->view_h, MIN_DIM, app->max_h);
-        ok = sparse_to_dense(app, bw, bh);
-        app->world = to;
-        app->gen = 0;
-        app->sim = SIM_STOPPED;
+/* Dispatch a key to the handler for the current mode. */
+static void handle_key(App *app, Key key) {
+    if (app->mode == UI_EDIT) {
+        handle_edit(app, key);
     } else {
-        app->world = to; /* infinite -> infinite: nothing to rebuild */
-    }
-
-    if (!ok) app->running = false; /* allocation failed: bail out */
-    app->mode = UI_NORMAL;
-    persist_settings(app); /* remember size / world type for next run */
-}
-
-static void handle_canvas(App *app, Key key) {
-    int *field = (app->canvas_field == 0) ? &app->pending_w : &app->pending_h;
-    int fmax = (app->canvas_field == 0) ? app->max_w : app->max_h;
-
-    switch (key) {
-        /* Moving focus starts the next field fresh (first digit replaces). */
-        case KEY_UP:   app->canvas_field = 0; app->canvas_editing = false; break;
-        case KEY_DOWN: app->canvas_field = 1; app->canvas_editing = false; break;
-        case KEY_TAB:  app->canvas_field ^= 1; app->canvas_editing = false; break;
-        case KEY_LEFT:
-            if (*field > MIN_DIM) (*field)--;
-            app->canvas_editing = true;
-            break;
-        case KEY_RIGHT:
-            if (*field < fmax) (*field)++;
-            app->canvas_editing = true;
-            break;
-        case KEY_BACKSPACE:
-            *field /= 10; /* delete last typed digit */
-            app->canvas_editing = true;
-            break;
-        case KEY_OTHER: {
-            int c = terminal_char();
-            if (c >= '0' && c <= '9') {
-                int d = c - '0';
-                /* First digit after (re)focusing replaces the shown value. */
-                long v = app->canvas_editing ? (long)(*field) * 10 + d : d;
-                *field = (v > fmax) ? fmax : (int)v;
-                app->canvas_editing = true;
-            }
-            break;
-        }
-        case KEY_SPACE:
-            app->pending_world = world_next(app->pending_world);
-            break;
-        case KEY_ENTER:
-            canvas_apply(app);
-            break;
-        case KEY_ESC:
-            app->mode = UI_NORMAL; /* cancel */
-            break;
-        case KEY_QUIT:
-            app->running = false;
-            break;
-        default:
-            break;
+        handle_normal(app, key);
     }
 }
 
@@ -1049,65 +698,6 @@ static bool build_initial(Board *initial, const Options *opt) {
     return true;
 }
 
-/* Clamp a dimension into the supported range. */
-static int clamp_dim(int v, int lo, int hi) {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
-/* Compute the largest board (cells) that fits the current terminal, bounded by
-   the absolute safety caps. The limit is the sixel pixel budget (down to one
-   pixel per cell). Falls back to the caps if the pixel size is unavailable. */
-static void fit_limits(int *max_w, int *max_h) {
-    int cols, rows, xpx, ypx;
-    if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
-        int cch = ypx / rows, ccw = xpx / cols;
-        if (cch > 0 && ccw > 0) {
-            *max_w = clamp_dim(xpx - ccw, MIN_DIM, HARD_MAX_W);
-            *max_h = clamp_dim(ypx - SIXEL_UI_ROWS * cch, MIN_DIM, HARD_MAX_H);
-            return;
-        }
-    }
-    *max_w = HARD_MAX_W;
-    *max_h = HARD_MAX_H;
-}
-
-/* React to a terminal resize: recompute the fit limits and, if the board no
-   longer fits, shrink it to fit (keeping pending canvas values in bounds). */
-static void handle_winch(App *app) {
-    fit_limits(&app->max_w, &app->max_h);
-
-    /* Infinite world: the viewport is recomputed every frame, nothing to
-       reallocate here. */
-    if (app->world == WORLD_INFINITE) {
-        if (app->pending_w > app->max_w) app->pending_w = app->max_w;
-        if (app->pending_h > app->max_h) app->pending_h = app->max_h;
-        return;
-    }
-
-    int nw = app->cur->width  > app->max_w ? app->max_w : app->cur->width;
-    int nh = app->cur->height > app->max_h ? app->max_h : app->cur->height;
-    if (nw != app->cur->width || nh != app->cur->height) {
-        if (!resize_boards(app, nw, nh)) {
-            app->running = false; /* allocation failed: bail out */
-            return;
-        }
-        persist_settings(app);
-    }
-    if (app->pending_w > app->max_w) app->pending_w = app->max_w;
-    if (app->pending_h > app->max_h) app->pending_h = app->max_h;
-}
-
-/* Dispatch a key to the handler for the current mode. */
-static void handle_key(App *app, Key key) {
-    switch (app->mode) {
-        case UI_EDIT:   handle_edit(app, key);   break;
-        case UI_CANVAS: handle_canvas(app, key); break;
-        default:        handle_normal(app, key); break;
-    }
-}
-
 int main(int argc, char **argv) {
     /* Start from persisted settings (or built-in defaults on first run), then
        let command-line options override for this run. */
@@ -1120,8 +710,7 @@ int main(int argc, char **argv) {
     Options opt = {
         .width = settings.width, .height = settings.height,
         .delay_ms = settings.delay_ms, .density = settings.density,
-        .seed = 0, .seed_set = false, .world = (WorldType)settings.world,
-        .config_path = NULL,
+        .seed = 0, .seed_set = false, .config_path = NULL,
     };
 
     int pr = parse_args(argc, argv, &opt);
@@ -1130,7 +719,7 @@ int main(int argc, char **argv) {
     }
 
     /* Enter raw mode up front: it is needed both for reading input and for
-       querying the terminal (sixel support) before we size the board. */
+       querying the terminal (sixel support) before we render. */
     if (!terminal_init()) {
         fprintf(stderr, "This program requires an interactive terminal.\n");
         return 1;
@@ -1148,22 +737,18 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Clamp the board to what fits the terminal now and fold the effective
-       (CLI-overridden) parameters back into settings. */
-    int max_w, max_h;
-    fit_limits(&max_w, &max_h);
-    settings.width = clamp_dim(opt.width, MIN_DIM, max_w);
-    settings.height = clamp_dim(opt.height, MIN_DIM, max_h);
-    settings.world = (int)opt.world;
-    settings.wrap = (opt.world == WORLD_TOROIDAL);
+    /* Fold the effective (CLI-overridden) parameters back into settings and
+       persist them so the seed-region size, delay and density carry over to the
+       next run. This also creates the file on first run. The world is always the
+       unbounded one now; keep the fields coherent for older readers. */
+    settings.width = clamp_dim(opt.width, MIN_DIM, HARD_MAX_W);
+    settings.height = clamp_dim(opt.height, MIN_DIM, HARD_MAX_H);
     settings.delay_ms = opt.delay_ms;
     settings.density = opt.density;
+    settings.world = 2; /* infinite */
+    settings.wrap = false;
     opt.width = settings.width;
     opt.height = settings.height;
-    /* Persist the effective settings so every remembered parameter — size,
-       world type, delay and density — carries over to the next run, whether it
-       came from the file or was overridden on the command line. This also
-       creates the file on first run. */
     settings_save(&settings); /* best effort */
 
     srand(opt.seed_set ? opt.seed : (unsigned int)time(NULL));
@@ -1174,20 +759,11 @@ int main(int argc, char **argv) {
     app.selected = BTN_START;
     app.delay_ms = opt.delay_ms;
     app.running = true;
-    app.cursor_x = opt.width / 2;
-    app.cursor_y = opt.height / 2;
     app.blink_on = true;
-    app.pending_w = opt.width;
-    app.pending_h = opt.height;
-    app.world = opt.world;
-    app.pending_world = opt.world;
-    app.canvas_field = 0;
-    app.max_w = max_w;
-    app.max_h = max_h;
+    app.follow = false;
     app.view_w = opt.width;
     app.view_h = opt.height;
     app.infinite_cell_px = INFINITE_CELL_PX;
-    app.settings = &settings;
 
     app.sparse = sparse_new();
     app.sparse_initial = sparse_new();
@@ -1196,16 +772,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (!board_init(&app.initial, opt.width, opt.height) ||
-        !board_init(&app.a, opt.width, opt.height) ||
-        !board_init(&app.b, opt.width, opt.height)) {
-        fprintf(stderr, "Failed to allocate board\n");
-        return 1;
-    }
-    app.cur = &app.a;
-    app.next = &app.b;
-
-    /* Restore the terminal on termination, and refit on window resize. No
+    /* Restore the terminal on termination, and wake the loop on window resize. No
        SA_RESTART on SIGWINCH so it interrupts poll() and wakes the loop. */
     struct sigaction sa_term = {0};
     sa_term.sa_handler = on_term;
@@ -1215,21 +782,26 @@ int main(int argc, char **argv) {
     sa_winch.sa_handler = on_winch;
     sigaction(SIGWINCH, &sa_winch, NULL);
 
-    if (!build_initial(&app.initial, &opt)) {
-        board_free(&app.initial);
-        board_free(&app.a);
-        board_free(&app.b);
+    /* Lay the initial pattern out in a dense seed board, hand it to the sparse
+       world, then discard the board — the world is unbounded from here on. */
+    Board initial;
+    if (!board_init(&initial, opt.width, opt.height)) {
+        fprintf(stderr, "Failed to allocate board\n");
         sparse_free(app.sparse);
         sparse_free(app.sparse_initial);
         return 1;
     }
-    board_copy(app.cur, &app.initial);
-
-    /* Starting directly in the infinite world: seed the sparse state from the
-       loaded pattern and centre the viewport on it. */
-    if (app.world == WORLD_INFINITE) {
-        dense_to_sparse(&app);
+    if (!build_initial(&initial, &opt)) {
+        board_free(&initial);
+        sparse_free(app.sparse);
+        sparse_free(app.sparse_initial);
+        return 1;
     }
+    seed_from_board(&app, &initial);
+    board_free(&initial);
+
+    app.cursor_x = app.cam_x + app.view_w / 2;
+    app.cursor_y = app.cam_y + app.view_h / 2;
 
     printf(ANSI_HIDE_CURSOR ANSI_CLEAR);
     render(&app);
@@ -1247,11 +819,11 @@ int main(int argc, char **argv) {
         }
         Key key = terminal_read_key(timeout);
 
-        /* A window resize (SIGWINCH interrupts the poll above) refits the board
-           before we redraw. */
+        /* A window resize (SIGWINCH interrupts the poll above) is handled simply
+           by redrawing: the viewport is recomputed from the terminal size every
+           frame, so there is nothing to reallocate. */
         if (g_resized) {
             g_resized = 0;
-            handle_winch(&app);
         }
 
         if (app.mode == UI_EDIT) {
@@ -1286,9 +858,6 @@ int main(int argc, char **argv) {
     fflush(stdout);
     terminal_restore();
 
-    board_free(&app.initial);
-    board_free(&app.a);
-    board_free(&app.b);
     sparse_free(app.sparse);
     sparse_free(app.sparse_initial);
     return 0;

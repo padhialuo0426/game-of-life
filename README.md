@@ -3,12 +3,12 @@
 *[中文说明](README.zh.md)*
 
 An interactive terminal implementation of Conway's Game of Life, written in C
-and built with CMake. The board is drawn with **sixel** real-pixel graphics,
-with an on-screen button bar. The world can be **finite**
-(patterns that leave the edge vanish — the default), **toroidal** (edges wrap
-around), or **infinite** (an unbounded, sparsely-stored world you pan and zoom
-with the mouse). Board size, world type and other parameters are remembered
-between runs.
+and built with CMake. It is an **unbounded sandbox**: the world has no walls and
+is stored sparsely (only the live cells are kept, in a hash set), so memory and
+per-generation cost scale with the population, not with any area — a glider just
+keeps travelling forever. You **pan** the view by dragging with the mouse,
+**zoom** with the wheel, and can drop or draw patterns anywhere. The board is
+drawn with **sixel** real-pixel graphics, with an on-screen button bar.
 
 > **Requires a sixel-capable terminal** (e.g. iTerm2, Konsole, WezTerm, foot,
 > `xterm -ti vt340`, mlterm, recent Windows Terminal). Terminals without sixel —
@@ -61,7 +61,7 @@ Notes:
 ```sh
 ./build/release/game-of-life                              # default / remembered
 ./build/release/game-of-life -f patterns/glider.cells    # load a pattern file
-./build/release/game-of-life -f patterns/pulsar.cells -w 40 -h 24
+./build/release/game-of-life -f patterns/pulsar.cells -w 40 -h 24  # seed-region size
 ./build/release/game-of-life --help                      # all options
 ```
 
@@ -69,17 +69,21 @@ A sixel-capable interactive terminal is required (see [Requirements](#conways-ga
 
 ## Controls
 
-The bar below the image has six buttons:
-**Start / Pause / Step / Reset / Edit / Canvas**. There is no Quit button — `q`
+The bar below the image has five buttons:
+**Start / Pause / Step / Reset / Edit**. There is no Quit button — `q`
 (or `Ctrl-C`) quits from any screen.
 
-The board is drawn as a sixel bitmap: each cell is a square block of pixels that
-auto-scales to fill the available space.
+The board is drawn as a sixel bitmap: each cell is a square block of pixels whose
+size is the current zoom level.
 
 ### Normal mode (button bar)
 
 | Key | Action |
 | --- | --- |
+| **drag** (left button) | pan the view (grab-and-drag) |
+| **mouse wheel** | zoom in / out, anchored on the cursor |
+| `c` | recentre the view on the pattern |
+| `f` | toggle follow mode (auto-recentre every generation) |
 | `Tab` or `Right` | move selection to the next button |
 | `Left` | move selection to the previous button |
 | `Space` or `Enter` | activate the selected button |
@@ -91,60 +95,45 @@ auto-scales to fill the available space.
   paused/reset state, so you can watch the simulation frame by frame.
 - **Reset** — reload the initial configuration (generation 0).
 - **Edit** — enter edit mode (see below).
-- **Canvas** — enter canvas mode: resize and/or switch world type (see below).
+
+The status line shows the state, generation, camera position `Cam: (x,y)`, the
+live-cell count, the current zoom (`Zoom: Npx`, pixels per cell), and whether
+follow mode is on.
+
+### Exploring the world (pan, zoom, recenter, follow)
+
+The world is unbounded, so the terminal shows a **viewport** into it:
+
+- **Drag with the left button** to pan (the point under the cursor stays under
+  it).
+- **Mouse wheel** to zoom, anchored on the cursor — from one pixel per cell when
+  zoomed all the way out, up to chunky cells.
+- **`c`** recentres the view on the live cells' bounding box — handy when a
+  pattern has drifted off-screen.
+- **`f`** toggles **follow mode**, which recentres every generation so you can
+  watch a spaceship travel without it leaving the screen.
 
 ### Edit mode
 
-Draw or modify the initial configuration by hand. A blinking outline (a yellow
-border around the cell) marks the current cell; it flashes so you can still see
-whether that cell is alive or dead.
+Draw or modify the configuration by hand. A blinking outline (a yellow border
+around the cell) marks the current cell; it flashes so you can still see whether
+that cell is alive or dead. The cursor roams the unbounded world with the arrow
+keys and the view follows it.
 
 | Key | Action |
 | --- | --- |
-| arrow keys | move the cursor |
+| arrow keys | move the cursor (the view follows) |
 | `Space` or `Enter` | toggle the cell under the cursor (alive/dead) |
 | `Tab` or `Esc` | leave edit mode |
 
-On leaving, the edited grid becomes the new initial configuration, so **Reset**
+On leaving, the edited world becomes the new restart configuration, so **Reset**
 returns to what you drew.
-
-### Canvas mode
-
-Change the board dimensions and/or the world type. An existing pattern is
-preserved, centered inside the new size (cells outside the new bounds are
-clipped).
-
-| Key | Action |
-| --- | --- |
-| digits `0`–`9` | type a number straight into the focused field |
-| `Backspace` | delete the last digit |
-| `Up` / `Down` or `Tab` | move focus between the Width and Height fields |
-| `Left` / `Right` | nudge the focused field by ∓1 |
-| `Space` | cycle world type: Finite → Toroidal → Infinite |
-| `Enter` | apply (and remember the new settings) |
-| `Esc` | cancel |
-
-Just type the size you want — e.g. focus Width, type `120`, press `Down`, type
-`80`. Sizes range from 3 up to the largest board that fits the current terminal.
-Applying only resets the simulation to generation 0 when the size actually
-changed, so a pure Finite↔Toroidal switch leaves a running simulation intact.
-Applied changes are saved to `settings.json` (see below).
-
-### Fitting the terminal
-
-The board is automatically kept within the terminal window: on startup the
-requested/remembered size is clamped to fit, and the maximum size in canvas mode
-is whatever fits. If you resize the terminal window while the program is
-running, the board adapts — it shrinks to fit a smaller window (it is not forced
-to grow when the window gets larger). A very large `-w`/`-h` is simply clamped to
-what the terminal can show.
 
 ### Sixel rendering
 
 The board is drawn as a real **sixel** bitmap: each cell becomes a block of
-pixels, so the board is limited only by the terminal's **pixel** dimensions, and
-the world can grow to hundreds of cells across. The image auto-scales
-(zoom-to-fit): small boards get chunky cells, large boards get one-pixel cells.
+pixels, so the viewport is limited only by the terminal's **pixel** dimensions —
+it fills the whole window at any zoom, down to one pixel per cell.
 
 Sixel support is detected at startup via a Device Attributes query. If your
 terminal supports sixel but is not detected, force detection on:
@@ -156,39 +145,6 @@ GOL_SIXEL=1 game-of-life   # skip the query, assume sixel is available
 Setting `GOL_SIXEL=0` forces detection off, in which case the program will
 report that a sixel-capable terminal is required and exit.
 
-### World type: finite, toroidal, infinite
-
-- **Finite** (default) — cells beyond the border are dead. Patterns that travel
-  off an edge collide with the wall and disappear (a glider crashing into a
-  corner leaves a small still-life remnant).
-- **Toroidal** — the edges wrap around (top↔bottom, left↔right), so a glider
-  that leaves one edge reappears on the opposite one.
-- **Infinite** — an unbounded world with no walls. It is stored sparsely (only
-  the live cells are kept, in a hash set), so memory and per-generation cost
-  scale with the population, not with any area. A glider just keeps travelling
-  forever. The terminal shows a **viewport** into this world; drag with the
-  mouse to pan and use the wheel to zoom (see below).
-
-Start with `--wrap` (toroidal) or `--infinite`, or switch any time in canvas
-mode. Finite and Toroidal use a dense grid engine; Infinite uses the sparse one.
-
-### Exploring the infinite world (pan & zoom)
-
-In the infinite world the board no longer has a fixed size, so you explore it
-with the mouse:
-
-- **Drag with the left button** to pan (grab-and-drag: the point under the
-  cursor stays under it).
-- **Mouse wheel** to zoom, anchored on the cursor — from one pixel per cell when
-  zoomed all the way out, up to chunky cells.
-
-The `Tab`/`Left`/`Right` keys move the button selection, exactly as in the
-bounded worlds. The status line shows the camera position `Cam: (x,y)`, the
-live-cell count, and the current zoom (`Zoom: Npx`, pixels per cell). In edit
-mode the cursor roams the unbounded world with the arrow keys and the view
-follows it. Switching from Infinite back to a bounded world adopts the current
-viewport as the new finite canvas.
-
 ## Settings persistence
 
 Parameters are remembered between runs in a JSON file:
@@ -199,15 +155,12 @@ $XDG_CONFIG_HOME/game-of-life/settings.json
 ~/.config/game-of-life/settings.json
 ```
 
-- The effective settings — board size, world type, delay and density — are
-  written to this file on **every** run (creating it on the first run), so a
-  configuration always carries over to the next run.
-- Applying changes in **Canvas** mode writes the new board size and world type
-  back immediately (as does shrinking the board to fit a resized terminal).
-- Command-line options that map to a stored setting (size, world type, delay,
-  density) are applied for the run **and** persisted, so an option you pass
-  (e.g. `-w 50`) becomes the remembered value next time. `-s`/`-f` are not
-  stored.
+- The effective settings — seed-region size, delay and density — are written to
+  this file on **every** run (creating it on the first run), so a configuration
+  always carries over to the next run.
+- Command-line options that map to a stored setting (size, delay, density) are
+  applied for the run **and** persisted, so an option you pass (e.g. `-w 50`)
+  becomes the remembered value next time. `-s`/`-f` are not stored.
 
 Example `settings.json`:
 
@@ -216,27 +169,26 @@ Example `settings.json`:
   "width": 30,
   "height": 20,
   "wrap": false,
-  "world": 0,
+  "world": 2,
   "delay_ms": 120,
   "density": 0.250
 }
 ```
 
-`world` is `0` = finite, `1` = toroidal, `2` = infinite. (`wrap` is kept for
-backward compatibility with older versions.)
+`width`/`height` size the seed region a random/loaded pattern starts in (the
+world itself is unbounded). `world`/`wrap` are always `2`/`false` now and kept
+only for backward compatibility with older versions.
 
 ## Options
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `-w, --width N` | Board width in cells | 30 (or remembered) |
-| `-h, --height N` | Board height in cells | 20 (or remembered) |
+| `-w, --width N` | Seed-region width in cells | 30 (or remembered) |
+| `-h, --height N` | Seed-region height in cells | 20 (or remembered) |
 | `-d, --delay MS` | Delay between generations (ms) | 120 |
 | `-p, --density F` | Random initial live-cell probability (0..1) | 0.25 |
 | `-s, --seed N` | Random seed (default: time-based) | — |
 | `-f, --file PATH` | Load initial config from a pattern file | default path |
-| `--wrap` | Start in toroidal (wrap-around) world | finite |
-| `--infinite` | Start in the unbounded (sparse) world | finite |
 
 ### Default pattern
 
