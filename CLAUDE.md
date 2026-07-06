@@ -122,14 +122,22 @@ image-retention bug — no escape sequence makes it release the memory. Our
 mitigations (alt screen, dedup, coalescing) bound the idle/interactive cases and
 slow the rest, but an active simulation on a leaky iTerm2 will still grow.
 
+**CONFIRMED iTerm2-specific (2026-07-06, Fedora + Konsole).** Verified on the
+Linux box: (1) an automated PTY check sampling our own process RSS during 18s of
+active simulation showed it flat at 3304 KB — **zero growth; our process does not
+leak**. (2) The user ran `--infinite` in Konsole watching the Konsole process
+memory: **stable across active sim + long drags**, and drag-pan + wheel-zoom are
+smooth/responsive, no crash. So the blow-up is purely iTerm2's image retention;
+Konsole/WezTerm/foot are fine. Real fix for the iTerm2 user = update to ≥3.7.0beta1.
+
 See also the memory note: `.claude/.../memory/sixel-scrollback-retention.md`.
 
 ## Next steps (in priority order)
 
-1. **Verify on Fedora + Konsole** (user is doing this). Konsole should NOT leak;
-   if it's stable there, that confirms the blow-up is iTerm2-specific. Check:
-   (a) wheel-zoom feel + fills the whole width at 1px; (b) drag lag gone; (c) no
-   crash; (d) memory stable across runs / long drags.
+1. ~~**Verify on Fedora + Konsole**~~ **DONE (2026-07-06).** Konsole memory stable
+   across active sim + long drags; drag-pan + wheel-zoom smooth; no crash. Our own
+   process RSS flat under a PTY memory check. Confirms the blow-up is iTerm2-specific.
+   (See the CONFIRMED note in "THE OPEN BUG" above.)
 2. **Recommend the user update iTerm2 to ≥ 3.7.0beta1** — the actual fix for the leak.
 3. **If the infinite pan+zoom feels good → remove Toroidal and Finite worlds**
    (the agreed direction). That deletes: dense-engine stepping for bounded worlds,
