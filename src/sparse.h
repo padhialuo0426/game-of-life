@@ -37,6 +37,13 @@ void sparse_step(SparseWorld *w);
 bool sparse_bounds(const SparseWorld *w, int *minx, int *miny,
                    int *maxx, int *maxy);
 
+/* Invoke fn(x, y, ud) for every live cell inside the half-open rectangle
+   [x0, x1) x [y0, y1). Iteration order is unspecified. The cost is O(live
+   population), not the rectangle's area, so rendering a viewport over a sparse
+   world stays cheap even when the viewport spans millions of cells. */
+void sparse_query(const SparseWorld *w, int x0, int y0, int x1, int y1,
+                  void (*fn)(int x, int y, void *ud), void *ud);
+
 /* Replace the contents of dst with a copy of src's live cells. */
 void sparse_copy(SparseWorld *dst, const SparseWorld *src);
 

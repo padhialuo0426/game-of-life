@@ -84,44 +84,96 @@ static void emit_run(Buf *b, int count, char ch) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Rendering                                                          */
+/* Incremental canvas                                                 */
 /* ------------------------------------------------------------------ */
 
-char *sixel_render_board(const Board *board, int cell_px,
-                         int cursor_x, int cursor_y, bool cursor_on,
-                         size_t *out_len) {
+struct SixelCanvas {
+    int cols, rows;      /* size in cells                                */
+    int cell_px;         /* pixels per cell (square)                     */
+    int W, H;            /* pixel dimensions = cols/rows * cell_px       */
+    bool gap;            /* draw grid lines between cells                */
+    unsigned char *pix;  /* W*H colour indices                           */
+};
+
+SixelCanvas *sixel_canvas_new(int cols, int rows, int cell_px) {
     if (cell_px < 1) cell_px = 1;
-    const int W = board->width * cell_px;
-    const int H = board->height * cell_px;
-    if (W <= 0 || H <= 0) return NULL;
+    if (cols < 1 || rows < 1) return NULL;
 
-    /* Intermediate bitmap: one colour index per pixel. */
-    unsigned char *pix = malloc((size_t)W * (size_t)H);
-    if (pix == NULL) return NULL;
+    SixelCanvas *c = malloc(sizeof(*c));
+    if (c == NULL) return NULL;
+    c->cols = cols;
+    c->rows = rows;
+    c->cell_px = cell_px;
+    c->W = cols * cell_px;
+    c->H = rows * cell_px;
+    c->gap = cell_px >= GRID_MIN_CELL_PX;
+    if (c->W <= 0 || c->H <= 0) {
+        free(c);
+        return NULL;
+    }
+    c->pix = malloc((size_t)c->W * (size_t)c->H);
+    if (c->pix == NULL) {
+        free(c);
+        return NULL;
+    }
+    memset(c->pix, PIX_DEAD, (size_t)c->W * (size_t)c->H);
 
-    const bool gap = cell_px >= GRID_MIN_CELL_PX;
-    for (int cy = 0; cy < board->height; cy++) {
-        for (int cx = 0; cx < board->width; cx++) {
-            const unsigned char base = board_get(board, cx, cy) ? PIX_ALIVE : PIX_DEAD;
-            const bool is_cursor = cursor_on && cx == cursor_x && cy == cursor_y;
-            for (int py = 0; py < cell_px; py++) {
-                for (int px = 0; px < cell_px; px++) {
-                    unsigned char c = base;
-                    /* Grid lines on the right/bottom edge of each cell. */
-                    if (gap && (px == cell_px - 1 || py == cell_px - 1)) {
-                        c = PIX_GRID;
+    /* Grid lines on the right/bottom edge of every cell, drawn once up front so
+       plotting live cells never has to re-check them. */
+    if (c->gap) {
+        for (int cy = 0; cy < rows; cy++) {
+            for (int cx = 0; cx < cols; cx++) {
+                for (int py = 0; py < cell_px; py++) {
+                    for (int px = 0; px < cell_px; px++) {
+                        if (px == cell_px - 1 || py == cell_px - 1) {
+                            c->pix[(size_t)(cy * cell_px + py) * (size_t)c->W +
+                                   (size_t)(cx * cell_px + px)] = PIX_GRID;
+                        }
                     }
-                    /* Cursor outline sits on the cell's border. */
-                    if (is_cursor && (px == 0 || py == 0 ||
-                                      px == cell_px - 1 || py == cell_px - 1)) {
-                        c = PIX_CURSOR;
-                    }
-                    pix[(size_t)(cy * cell_px + py) * (size_t)W +
-                        (size_t)(cx * cell_px + px)] = c;
                 }
             }
         }
     }
+    return c;
+}
+
+void sixel_canvas_free(SixelCanvas *canvas) {
+    if (canvas == NULL) return;
+    free(canvas->pix);
+    free(canvas);
+}
+
+void sixel_canvas_set_alive(SixelCanvas *canvas, int col, int row) {
+    if (col < 0 || col >= canvas->cols || row < 0 || row >= canvas->rows) return;
+    const int cp = canvas->cell_px;
+    const int ox = col * cp, oy = row * cp;
+    for (int py = 0; py < cp; py++) {
+        for (int px = 0; px < cp; px++) {
+            /* Leave the grid lines untouched so cells stay separated. */
+            if (canvas->gap && (px == cp - 1 || py == cp - 1)) continue;
+            canvas->pix[(size_t)(oy + py) * (size_t)canvas->W + (size_t)(ox + px)] =
+                PIX_ALIVE;
+        }
+    }
+}
+
+void sixel_canvas_set_cursor(SixelCanvas *canvas, int col, int row) {
+    if (col < 0 || col >= canvas->cols || row < 0 || row >= canvas->rows) return;
+    const int cp = canvas->cell_px;
+    const int ox = col * cp, oy = row * cp;
+    for (int py = 0; py < cp; py++) {
+        for (int px = 0; px < cp; px++) {
+            if (px == 0 || py == 0 || px == cp - 1 || py == cp - 1) {
+                canvas->pix[(size_t)(oy + py) * (size_t)canvas->W +
+                            (size_t)(ox + px)] = PIX_CURSOR;
+            }
+        }
+    }
+}
+
+char *sixel_canvas_encode(const SixelCanvas *canvas, size_t *out_len) {
+    const int W = canvas->W, H = canvas->H;
+    const unsigned char *pix = canvas->pix;
 
     Buf b = {0};
 
@@ -147,7 +199,6 @@ char *sixel_render_board(const Board *board, int cell_px,
        colour that appears is written as one overlay pass. */
     unsigned char *line = malloc((size_t)W); /* one sixel byte per column */
     if (line == NULL) {
-        free(pix);
         free(b.data);
         return NULL;
     }
@@ -186,7 +237,6 @@ char *sixel_render_board(const Board *board, int cell_px,
     buf_puts(&b, "\033\\"); /* String Terminator */
 
     free(line);
-    free(pix);
 
     if (b.oom) {
         free(b.data);
@@ -195,4 +245,28 @@ char *sixel_render_board(const Board *board, int cell_px,
     b.data[b.len] = '\0';
     if (out_len) *out_len = b.len;
     return b.data;
+}
+
+/* ------------------------------------------------------------------ */
+/* Board rendering (built on the incremental canvas)                  */
+/* ------------------------------------------------------------------ */
+
+char *sixel_render_board(const Board *board, int cell_px,
+                         int cursor_x, int cursor_y, bool cursor_on,
+                         size_t *out_len) {
+    SixelCanvas *c = sixel_canvas_new(board->width, board->height, cell_px);
+    if (c == NULL) return NULL;
+
+    for (int cy = 0; cy < board->height; cy++) {
+        for (int cx = 0; cx < board->width; cx++) {
+            if (board_get(board, cx, cy)) sixel_canvas_set_alive(c, cx, cy);
+        }
+    }
+    if (cursor_on && cursor_x >= 0 && cursor_y >= 0) {
+        sixel_canvas_set_cursor(c, cursor_x, cursor_y);
+    }
+
+    char *img = sixel_canvas_encode(c, out_len);
+    sixel_canvas_free(c);
+    return img;
 }

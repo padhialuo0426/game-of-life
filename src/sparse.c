@@ -259,6 +259,18 @@ bool sparse_bounds(const SparseWorld *w, int *minx, int *miny,
     return true;
 }
 
+void sparse_query(const SparseWorld *w, int x0, int y0, int x1, int y1,
+                  void (*fn)(int x, int y, void *ud), void *ud) {
+    for (size_t i = 0; i < w->live.cap; i++) {
+        if (!w->live.occ[i]) continue;
+        int x, y;
+        unpack(w->live.keys[i], &x, &y);
+        if (x >= x0 && x < x1 && y >= y0 && y < y1) {
+            fn(x, y, ud);
+        }
+    }
+}
+
 void sparse_copy(SparseWorld *dst, const SparseWorld *src) {
     if (dst == src) return;
     map_clear(&dst->live);

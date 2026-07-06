@@ -102,13 +102,12 @@ typedef struct {
     bool sx_drawn;              /* an image has been emitted at least once */
 
     /* Infinite world (WORLD_INFINITE): unbounded sparse state + a pannable
-       viewport snapshotted into `view` for rendering. */
+       viewport rendered straight from the live-cell set (no dense snapshot). */
     SparseWorld *sparse;        /* live cells */
     SparseWorld *sparse_initial;/* config restored by Stop */
     int cam_x, cam_y;           /* viewport top-left in world coordinates */
     int view_w, view_h;         /* current viewport size in cells */
     int infinite_cell_px;       /* pixels per cell (mouse-wheel zoom level) */
-    Board view;                 /* scratch dense snapshot of the viewport */
 
     /* Left-drag panning (WORLD_INFINITE). While the left button is held, the
        camera is recomputed from the anchor captured on press so the grabbed
@@ -309,44 +308,17 @@ static void infinite_viewport(const App *app, int *vw, int *vh) {
     *vh = 20;
 }
 
-/* Return the board to render this frame and the cursor position within it
-   (cx < 0 means "no cursor"). For the infinite world this snapshots the
-   viewport out of the sparse state into app->view; otherwise it is app->cur. */
-static const Board *prepare_view(App *app, int *cx, int *cy) {
-    if (app->world != WORLD_INFINITE) {
-        app->view_w = app->cur->width;
-        app->view_h = app->cur->height;
-        *cx = (app->mode == UI_EDIT) ? app->cursor_x : -1;
-        *cy = (app->mode == UI_EDIT) ? app->cursor_y : -1;
-        return app->cur;
-    }
+/* Plot each live cell of the infinite world onto the sixel canvas, translating
+   world coordinates to viewport-local cells. Passed to sparse_query so only the
+   live population is touched, never every cell of the (possibly huge) viewport. */
+typedef struct {
+    SixelCanvas *canvas;
+    int cam_x, cam_y;
+} PlotCtx;
 
-    int vw, vh;
-    infinite_viewport(app, &vw, &vh);
-    app->view_w = vw;
-    app->view_h = vh;
-    if (app->view.cells == NULL || app->view.width != vw || app->view.height != vh) {
-        board_free(&app->view);
-        if (!board_init(&app->view, vw, vh)) {
-            *cx = -1;
-            *cy = -1;
-            return app->cur; /* OOM: degrade rather than crash */
-        }
-    }
-    for (int j = 0; j < vh; j++) {
-        for (int i = 0; i < vw; i++) {
-            board_set(&app->view, i, j,
-                      sparse_get(app->sparse, app->cam_x + i, app->cam_y + j));
-        }
-    }
-    if (app->mode == UI_EDIT) {
-        *cx = app->cursor_x - app->cam_x;
-        *cy = app->cursor_y - app->cam_y;
-    } else {
-        *cx = -1;
-        *cy = -1;
-    }
-    return &app->view;
+static void plot_cell_cb(int x, int y, void *ud) {
+    PlotCtx *p = (PlotCtx *)ud;
+    sixel_canvas_set_alive(p->canvas, x - p->cam_x, y - p->cam_y);
 }
 
 /* Append the controls block below the sixel image: status line, a blank line,
@@ -447,48 +419,16 @@ static uint64_t fnv1a(const char *data, size_t len) {
     return h;
 }
 
-/* Sixel renderer: draw the board as a bitmap (one cell = cell_px pixels, chosen
-   to fill the available space), then the text controls below it. Returns false
-   if the layout cannot be computed (no pixel size, board too tall, etc.); the
-   caller then simply skips the frame. Sixel is the only renderer. */
-static bool render_sixel(App *app, const Board *board, int cx, int cy) {
-    int cols, rows, xpx, ypx;
-    if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
-        return false;
-    }
-    const int cch = ypx / rows; /* pixel height of one character cell */
-    const int ccw = xpx / cols; /* pixel width  of one character cell */
-    if (cch <= 0 || ccw <= 0) return false;
-
-    const int avail_w = xpx - ccw;                 /* ~1 column right margin */
-    const int avail_h = ypx - SIXEL_UI_ROWS * cch; /* rows reserved for the UI */
-    if (avail_w < board->width || avail_h < board->height) {
-        return false; /* cannot fit even one pixel per cell */
-    }
-
-    /* Zoom to fit: largest square cell that fits both dimensions. */
-    int cell = avail_w / board->width;
-    int ch = avail_h / board->height;
-    if (ch < cell) cell = ch;
-    if (cell < 1) cell = 1;
-    if (cell > SIXEL_CELL_MAX) cell = SIXEL_CELL_MAX;
-
-    const int img_w = board->width * cell;
-    const int img_h = board->height * cell;
+/* Emit an already-encoded sixel image plus the controls below it. Re-emits the
+   image only when it actually changed since the last frame (see the dedup note),
+   so idle frames cost nothing and do not pile images into terminals that retain
+   them (e.g. older iTerm2). `ctl_board` is passed through to append_controls for
+   the size readout; it may be NULL in the infinite world, which reads no board.
+   Takes ownership of `img` and frees it. */
+static void emit_frame(App *app, char *img, size_t img_len,
+                       int img_w, int img_h, int cch, const Board *ctl_board) {
     const int img_rows = (img_h + cch - 1) / cch; /* char rows the image spans */
 
-    const bool con = (cx >= 0) && app->blink_on;
-
-    size_t img_len = 0;
-    char *img = sixel_render_board(board, cell, cx, cy, con, &img_len);
-    if (img == NULL) return false;
-
-    /* Re-emit the sixel image only when it actually changed since the last frame.
-       This skips the (expensive, and on some terminals leaky) bitmap when only
-       the controls change — moving the button selection, a paused/stopped board,
-       a stabilised pattern — so idle frames cost nothing and do not pile images
-       into terminals that retain them (e.g. older iTerm2). The controls below are
-       always redrawn. */
     const uint64_t hash = fnv1a(img, img_len);
     const bool image_changed = !app->sx_drawn || hash != app->sx_last_hash ||
                                img_w != app->sx_last_w || img_h != app->sx_last_h;
@@ -513,18 +453,104 @@ static bool render_sixel(App *app, const Board *board, int cx, int cy) {
     char ctl[2048];
     size_t n = 0;
     appendf(ctl, sizeof(ctl), &n, "\033[%d;1H", img_rows + 1);
-    append_controls(app, board, ctl, sizeof(ctl), &n);
+    append_controls(app, ctl_board, ctl, sizeof(ctl), &n);
     appendf(ctl, sizeof(ctl), &n, ANSI_CLR_BELOW);
     fwrite(ctl, 1, n, stdout);
 
     fflush(stdout);
+}
+
+/* Sixel renderer for the bounded worlds: draw the board as a bitmap (one cell =
+   cell_px pixels, chosen to fill the available space), then the controls below
+   it. Returns false if the layout cannot be computed (no pixel size, board too
+   tall, etc.); the caller then simply skips the frame. */
+static bool render_sixel(App *app, const Board *board, int cx, int cy) {
+    int cols, rows, xpx, ypx;
+    if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
+        return false;
+    }
+    const int cch = ypx / rows; /* pixel height of one character cell */
+    const int ccw = xpx / cols; /* pixel width  of one character cell */
+    if (cch <= 0 || ccw <= 0) return false;
+
+    const int avail_w = xpx - ccw;                 /* ~1 column right margin */
+    const int avail_h = ypx - SIXEL_UI_ROWS * cch; /* rows reserved for the UI */
+    if (avail_w < board->width || avail_h < board->height) {
+        return false; /* cannot fit even one pixel per cell */
+    }
+
+    /* Zoom to fit: largest square cell that fits both dimensions. */
+    int cell = avail_w / board->width;
+    int ch = avail_h / board->height;
+    if (ch < cell) cell = ch;
+    if (cell < 1) cell = 1;
+    if (cell > SIXEL_CELL_MAX) cell = SIXEL_CELL_MAX;
+
+    const int img_w = board->width * cell;
+    const int img_h = board->height * cell;
+
+    const bool con = (cx >= 0) && app->blink_on;
+
+    size_t img_len = 0;
+    char *img = sixel_render_board(board, cell, cx, cy, con, &img_len);
+    if (img == NULL) return false;
+
+    emit_frame(app, img, img_len, img_w, img_h, cch, board);
+    return true;
+}
+
+/* Sixel renderer for the infinite world: build the image straight from the
+   sparse live-cell set, plotting only the O(population) cells that fall inside
+   the viewport instead of probing every one of its (up to millions of) cells.
+   The viewport size and zoom come from the pannable camera, not zoom-to-fit. */
+static bool render_infinite(App *app) {
+    int cols, rows, xpx, ypx;
+    if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
+        return false;
+    }
+    const int cch = ypx / rows;
+    const int ccw = xpx / cols;
+    if (cch <= 0 || ccw <= 0) return false;
+
+    int vw, vh;
+    infinite_viewport(app, &vw, &vh);
+    app->view_w = vw;
+    app->view_h = vh;
+
+    const int cell = app->infinite_cell_px < 1 ? 1 : app->infinite_cell_px;
+
+    SixelCanvas *canvas = sixel_canvas_new(vw, vh, cell);
+    if (canvas == NULL) return false;
+
+    PlotCtx ctx = {canvas, app->cam_x, app->cam_y};
+    sparse_query(app->sparse, app->cam_x, app->cam_y,
+                 app->cam_x + vw, app->cam_y + vh, plot_cell_cb, &ctx);
+
+    if (app->mode == UI_EDIT && app->blink_on) {
+        sixel_canvas_set_cursor(canvas, app->cursor_x - app->cam_x,
+                                app->cursor_y - app->cam_y);
+    }
+
+    size_t img_len = 0;
+    char *img = sixel_canvas_encode(canvas, &img_len);
+    sixel_canvas_free(canvas);
+    if (img == NULL) return false;
+
+    emit_frame(app, img, img_len, vw * cell, vh * cell, cch, NULL);
     return true;
 }
 
 static void render(App *app) {
-    int cx, cy;
-    const Board *board = prepare_view(app, &cx, &cy);
-    render_sixel(app, board, cx, cy); /* sixel is required; a failed frame is skipped */
+    /* sixel is required; a failed frame is simply skipped. */
+    if (app->world == WORLD_INFINITE) {
+        render_infinite(app);
+    } else {
+        app->view_w = app->cur->width;
+        app->view_h = app->cur->height;
+        const int cx = (app->mode == UI_EDIT) ? app->cursor_x : -1;
+        const int cy = (app->mode == UI_EDIT) ? app->cursor_y : -1;
+        render_sixel(app, app->cur, cx, cy);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1231,7 +1257,6 @@ int main(int argc, char **argv) {
     board_free(&app.initial);
     board_free(&app.a);
     board_free(&app.b);
-    board_free(&app.view);
     sparse_free(app.sparse);
     sparse_free(app.sparse_initial);
     return 0;

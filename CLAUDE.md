@@ -52,6 +52,17 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora machine) Infinite world: render directly from the sparse set.**
+  Was next-step #4. `prepare_view` used to snapshot the whole viewport into a
+  dense `Board` with one `sparse_get` per viewport cell (O(viewport) hash lookups
+  — millions at 1px zoom), then encode. Now: `sparse_query(w, x0,y0,x1,y1, fn)`
+  iterates only the live population and plots onto a new incremental
+  `SixelCanvas` (`sixel_canvas_new/set_alive/set_cursor/encode/free` in sixel.c;
+  `sixel_render_board` reimplemented on top of it). Dropped `App.view` and
+  `prepare_view`; added `render_infinite()` + a shared `emit_frame()` tail.
+  Output is **byte-identical** to the old path; measured **6.9× faster** per
+  frame at 1000×1000 @ 1px (11.6→1.7 ms), unchanged at small viewports (encode
+  dominates there). Process RSS still flat.
 - `faa2fed` **Infinite world: mouse-wheel zoom + fix lag at large resolution.**
   - Wheel zoom anchored on the cursor; zoom level = pixels-per-cell in
     `[INFINITE_CELL_MIN=1 .. INFINITE_CELL_MAX=20]`, `ZOOM_STEP=2`. Stored in
@@ -143,12 +154,14 @@ See also the memory note: `.claude/.../memory/sixel-scrollback-retention.md`.
    (the agreed direction). That deletes: dense-engine stepping for bounded worlds,
    `WorldType` cycling in canvas, `resize_boards`, dense↔sparse conversions, and a
    lot of branching. Keep `Board` only as the render snapshot for the viewport.
-4. **Optional perf fix for huge screens / min zoom**: today `prepare_view`
-   snapshots the whole viewport into a dense `Board` each frame (O(viewport cells))
-   and encodes a near-full-screen sixel each frame. At 8K/1px that's ~tens of
-   millions of cells/px per frame → slow. Proper fix: **render directly from the
-   sparse live-cell set** (iterate live cells in view, plot pixels) → O(live cells
-   + pixels). Bigger change; do only if needed.
+4. ~~**Optional perf fix for huge screens / min zoom**~~ **DONE (2026-07-06,
+   Fedora).** Now renders directly from the sparse live-cell set via
+   `sparse_query` + the incremental `SixelCanvas` — no dense viewport snapshot,
+   so the per-frame cost dropped from O(viewport cells) hash lookups to O(live
+   population + pixels). 6.9× faster at 1000×1000 @ 1px, byte-identical output.
+   (See the changes list above.) Remaining cost at min zoom is the sixel encode
+   itself, O(pixels) — inherent to describing every pixel band; only worth
+   attacking further if huge-screen encode ever becomes the bottleneck.
 
 ## Gotchas / constraints for future work
 
