@@ -75,9 +75,12 @@ so the installed `~/.local/bin` binary stays current for the user to test.
   'q' (only Ctrl-C quits in text entry). rle.c unit-tested (canonical glider parse,
   round-trip, empty); PTY-tested in-app (save→clear→load, q-in-filename).
   `patterns/` now ships every pattern in **both** `.cells` (for `-f`/default) and
-  `.rle` (for in-app `l`). Note the split load paths: startup `-f`/default read
-  `.cells` via config.c; in-app `l` reads `.rle` via rle.c. Making either path
-  format-agnostic is an easy future cleanup if the split ever bites.
+  `.rle` (for in-app `l`). Startup `-f`/default dispatch on extension via
+  `load_pattern_file()` in main.c: `.rle` → rle.c (centred into the seed board like
+  a `.cells` pattern), anything else → config.c. So `-f foo.rle` and `-f foo.cells`
+  seed identically (verified equal for blinker/glider/glider-gun/pulsar/lwss/acorn).
+  Before this, `-f *.rle` was fed to the `.cells` plaintext parser and rendered
+  garbage (the RLE header + `b`/`o` tokens became "live" cells).
 - **(Fedora) Jump: rewind + fast-forward, with an engine seam for Hashlife.**
   New `LifeEngine`/`EngineSnapshot` abstraction (`engine.{c,h}`) and a bounded
   history ring (`history.{c,h}`). `j` / the **Jump** button opens a prompt: type

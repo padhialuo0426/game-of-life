@@ -1013,11 +1013,54 @@ static bool default_config_path(char *buf, size_t cap) {
     return true;
 }
 
+/* True if `path` ends (case-insensitively) with `.rle`. */
+static bool has_rle_ext(const char *path) {
+    size_t n = strlen(path);
+    return n >= 4 &&
+           (path[n - 4] == '.') &&
+           (path[n - 3] == 'r' || path[n - 3] == 'R') &&
+           (path[n - 2] == 'l' || path[n - 2] == 'L') &&
+           (path[n - 1] == 'e' || path[n - 1] == 'E');
+}
+
+/* Load a pattern file into `board`, picking the format by extension: `.rle`
+   goes through the RLE parser (rle.c), anything else through the `.cells`
+   plaintext parser (config.c). RLE cells are centred in the board the same way
+   config.c centres a `.cells` pattern, so `-f foo.rle` and `-f foo.cells` land
+   identically. Returns false (and fills errbuf) on failure. */
+static bool load_pattern_file(Board *board, const char *path, char *errbuf,
+                              size_t errbuf_size) {
+    if (!has_rle_ext(path)) {
+        return config_load_file(board, path, errbuf, errbuf_size);
+    }
+
+    int *cells = NULL;
+    size_t count = 0;
+    if (!rle_load(path, &cells, &count, errbuf, errbuf_size)) {
+        return false;
+    }
+    /* Pattern extent, then centre it into the fixed-size board (over-large
+       patterns are clipped, exactly as the .cells path clips). */
+    int w = 0, h = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (cells[2 * i] + 1 > w) w = cells[2 * i] + 1;
+        if (cells[2 * i + 1] + 1 > h) h = cells[2 * i + 1] + 1;
+    }
+    board_clear(board);
+    const int offx = (board->width - w) / 2;
+    const int offy = (board->height - h) / 2;
+    for (size_t i = 0; i < count; i++) {
+        board_set(board, offx + cells[2 * i], offy + cells[2 * i + 1], true);
+    }
+    free(cells);
+    return true;
+}
+
 static bool build_initial(Board *initial, const Options *opt) {
     if (opt->config_path != NULL) {
         /* An explicit -f must succeed; a bad path is a hard error. */
         char err[256];
-        if (!config_load_file(initial, opt->config_path, err, sizeof(err))) {
+        if (!load_pattern_file(initial, opt->config_path, err, sizeof(err))) {
             terminal_restore();
             printf(ANSI_SHOW_CURSOR);
             fprintf(stderr, "Error loading config: %s\n", err);
@@ -1029,7 +1072,7 @@ static bool build_initial(Board *initial, const Options *opt) {
     /* No -f: try the default config file, then silently fall back to random. */
     char path[1024];
     if (default_config_path(path, sizeof(path)) &&
-        config_load_file(initial, path, NULL, 0)) {
+        load_pattern_file(initial, path, NULL, 0)) {
         return true;
     }
     board_randomize(initial, opt->density);
