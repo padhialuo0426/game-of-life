@@ -22,6 +22,20 @@ void settings_defaults(Settings *s);
    "/game-of-life") into `buf`. Returns false if neither env var is set. */
 bool settings_config_dir(char *buf, size_t cap);
 
+/* Write the user-data directory ($XDG_DATA_HOME or ~/.local/share, plus
+   "/game-of-life") into `buf`. Saved patterns live under here, kept separate
+   from the config directory. Returns false if neither env var is set. */
+bool settings_data_dir(char *buf, size_t cap);
+
+/* Write the saves directory (<data-dir>/saves) into `buf`. This is where the
+   in-app Save/Load browse and where the default pattern (default.rle) lives.
+   Returns false if the data directory cannot be determined. */
+bool settings_saves_dir(char *buf, size_t cap);
+
+/* Create `path` and any missing parent directories (like `mkdir -p`, mode 0755).
+   Returns true on success (or if it already exists). */
+bool settings_mkdirs(const char *path);
+
 /* Write the full path to settings.json into `buf`. Returns false if the config
    directory cannot be determined. */
 bool settings_file_path(char *buf, size_t cap);

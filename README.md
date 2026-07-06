@@ -36,9 +36,9 @@ builds and runs single-threaded. Set `OMP_NUM_THREADS` to tune the core count.
 Installation goes to the user's home by default (no root needed):
 
 - the executable → `~/.local/bin/game-of-life`
-- the default pattern → `~/.config/game-of-life/default.cells`
-  (respects `XDG_CONFIG_HOME`; this is the file the program auto-loads when run
-  without `-f`)
+- the default pattern → `~/.local/share/game-of-life/saves/default.rle`
+  (respects `XDG_DATA_HOME`; this is the file the program auto-loads when run
+  without `-f`, and it sits alongside your own saved patterns)
 
 ```sh
 cmake --build --preset release          # build first
@@ -52,10 +52,10 @@ cmake --build build/release --target uninstall
 Notes:
 
 - Make sure `~/.local/bin` is on your `PATH` to run `game-of-life` directly.
-- Installing never overwrites an existing default config you have customised.
-- **uninstall** removes the executable, the default pattern and the
-  `settings.json` file (and the `game-of-life` config directory if it ends up
-  empty).
+- Installing never overwrites an existing `default.rle` you have customised.
+- **uninstall** removes the executable, the installed `default.rle`, and the
+  `settings.json` file (and the config/data directories if they end up empty). It
+  never deletes your own saved patterns.
 - For a system-wide install, override the prefix:
   `cmake --preset release -DCMAKE_INSTALL_PREFIX=/usr/local` (then `sudo cmake
   --install build/release`).
@@ -73,9 +73,10 @@ A sixel-capable interactive terminal is required (see [Requirements](#conways-ga
 
 ## Controls
 
-The bar below the image has six buttons:
-**Start / Pause / Step / Reset / Edit / Jump**. There is no Quit button — `q`
-(or `Ctrl-C`) quits from any screen.
+The bar below the image has eight buttons:
+**Start / Pause / Step / Reset / Edit / Jump / Save / Load**. Click a button with
+the mouse, or move the selection with `Tab`/arrows and press `Space`/`Enter`.
+There is no Quit button — `q` (or `Ctrl-C`) quits from any screen.
 
 The board is drawn as a sixel bitmap: each cell is a square block of pixels whose
 size is the current zoom level.
@@ -162,22 +163,36 @@ Press **`j`** (or the **Jump** button), type a target **generation**, and press
 
 ### Saving & loading patterns (RLE)
 
-Press **`s`** to save or **`l`** to load, type a filename, and press `Enter`
-(`Esc` cancels; the path is relative to the directory you launched from).
+Press **`s`** (or the **Save** button) and **`l`** (or **Load**) to open the
+save/load browser.
+
+- **Save** — type a name and press `Enter`; `.rle` is added automatically and the
+  file is written to your saves folder. If the name already exists you are asked
+  to confirm the overwrite.
+- **Load** — a scrollable list of your saved patterns with **Name / Size /
+  Modified** columns. Move with the arrow keys (or the mouse wheel), press
+  `Enter` or click a row to load it, `d` to delete (with confirmation), and
+  `n`/`s`/`m` (or click a column header) to sort — press again to reverse. If the
+  current world isn't empty, loading asks before replacing it. To load a file
+  from anywhere else, press `/` (or click **[Type a path…]**) and type a path —
+  handy for patterns downloaded from the wiki.
+
+Saved patterns live in `$XDG_DATA_HOME/game-of-life/saves/` (usually
+`~/.local/share/game-of-life/saves/`), kept separate from your settings. The
+startup default pattern lives there too, as `default.rle`.
 
 The format is the community-standard **RLE** (the one Golly and
-[LifeWiki](https://conwaylife.com/wiki/) use), so you can load guns, spaceships
-and other patterns downloaded from the wiki, and save your own creations to
-share. Loading replaces the world and centres the pattern in the view; saving
-writes every live cell of the current world. For example, a saved glider is:
+[LifeWiki](https://conwaylife.com/wiki/) use). Loading centres the pattern and
+zooms to fit; saving writes every live cell of the current world. For example, a
+saved glider is:
 
 ```
 x = 3, y = 3, rule = B3/S23
 bo$2bo$3o!
 ```
 
-(The `.cells` format is still accepted for the default pattern and `-f`; RLE is
-the interchange format for save/load because it stays compact for big patterns.)
+(The `.cells` format is still accepted for an explicit `-f`; RLE is the format
+for in-app save/load and the default pattern because it stays compact.)
 
 ### Sixel rendering
 
@@ -245,18 +260,19 @@ only for backward compatibility with older versions.
 ### Default pattern
 
 If `-f` is not given, the program looks for a default pattern file at
-`~/.config/game-of-life/default.cells` (respecting `XDG_CONFIG_HOME`). If that
-file exists it is loaded; otherwise the board falls back to a random start
+`~/.local/share/game-of-life/saves/default.rle` (respecting `XDG_DATA_HOME`). If
+that file exists it is loaded; otherwise the board falls back to a random start
 (density `-p`, default 0.25). An explicit `-f PATH` that cannot be read is a
 hard error, but a missing default file is not — it just triggers the random
 fallback.
 
-`make install` puts a glider there as `default.cells`. To use a different
-default, overwrite it, e.g.:
+`make install` puts a glider there as `default.rle`. To use a different default,
+overwrite it (or just save over it from inside the app with the name
+`default`), e.g.:
 
 ```sh
-mkdir -p ~/.config/game-of-life
-cp patterns/pulsar.cells ~/.config/game-of-life/default.cells
+mkdir -p ~/.local/share/game-of-life/saves
+cp patterns/pulsar.rle ~/.local/share/game-of-life/saves/default.rle
 ```
 
 ### Included patterns

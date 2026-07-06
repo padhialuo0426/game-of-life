@@ -9,6 +9,7 @@
 #include "sixel.h"
 #include "terminal.h"
 
+#include <dirent.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -17,6 +18,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp */
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -82,7 +85,29 @@
 #define FILE_BUF_MAX 255
 
 /* Top-level interaction mode. */
-typedef enum { UI_NORMAL, UI_EDIT, UI_JUMP, UI_FILE } UiMode;
+typedef enum {
+    UI_NORMAL,
+    UI_EDIT,
+    UI_JUMP,
+    UI_SAVE_NAME,  /* type a filename to save the current pattern */
+    UI_LOAD_LIST,  /* browse/sort/pick a saved pattern (or type a path) */
+    UI_CONFIRM     /* a modal y/n over a save/load action */
+} UiMode;
+
+/* Load-list sort key and a saved-pattern entry. */
+typedef enum { SORT_NAME, SORT_SIZE, SORT_MTIME } SortKey;
+typedef struct {
+    char name[256]; /* filename within the saves dir (includes ".rle") */
+    long size;      /* bytes */
+    long mtime;     /* modification time (unix seconds) */
+} SaveEntry;
+
+/* What a UI_CONFIRM y/n decides. */
+typedef enum {
+    CONFIRM_OVERWRITE, /* a save would clobber an existing file */
+    CONFIRM_REPLACE,   /* a load would replace a non-empty world */
+    CONFIRM_DELETE     /* delete the selected saved pattern */
+} ConfirmAction;
 
 /* Simulation sub-state, meaningful in UI_NORMAL. */
 typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
@@ -91,11 +116,13 @@ typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
    Quit button — 'q' (or Ctrl-C) quits from any screen. */
 typedef enum {
     BTN_START, BTN_PAUSE, BTN_STEP, BTN_RESET, BTN_EDIT, BTN_JUMP,
+    BTN_SAVE, BTN_LOAD,
     BTN_COUNT
 } Button;
 
 static const char *const BUTTON_LABELS[BTN_COUNT] = {
-    " Start ", " Pause ", " Step ", " Reset ", " Edit ", " Jump "};
+    " Start ", " Pause ", " Step ", " Reset ", " Edit ", " Jump ",
+    " Save ", " Load "};
 
 typedef struct {
     UiMode mode;
@@ -108,6 +135,12 @@ typedef struct {
     int sx_last_w, sx_last_h;   /* last sixel image pixel size (clear on change) */
     uint64_t sx_last_hash;      /* hash of the last emitted image bytes */
     bool sx_drawn;              /* an image has been emitted at least once */
+
+    /* Button-bar hit boxes, recomputed each frame so the bar is mouse-clickable.
+       Coordinates are 0-based to match the decoded SGR mouse position. bar_row is
+       -1 when no clickable bar is on screen (e.g. inside a dialog). */
+    int bar_row;
+    int btn_col0[BTN_COUNT], btn_col1[BTN_COUNT]; /* [col0, col1) per button */
 
     /* The unbounded world: a Life engine (sparse today) with a pannable,
        zoomable viewport rendered straight from its live cells. */
@@ -131,11 +164,31 @@ typedef struct {
     bool jumping;               /* a chunked jump is in progress (progress UI) */
     long jump_target;           /* its destination (for the progress readout) */
 
-    /* File prompt (UI_FILE): type a path to save/load an RLE pattern. */
+    /* Text entry shared by UI_SAVE_NAME (a filename) and the UI_LOAD_LIST
+       "type a path" input. */
     char file_buf[FILE_BUF_MAX + 1];
     int file_len;
-    bool file_saving;           /* true = save, false = load */
     char msg[320];              /* transient result of the last save/load */
+
+    /* Load browser (UI_LOAD_LIST). */
+    SaveEntry *saves;           /* scanned *.rle in the saves dir */
+    int save_count;
+    int save_sel;               /* highlighted entry */
+    int save_top;               /* first visible entry (scroll offset) */
+    int save_visible;           /* entries shown by the last dialog frame */
+    SortKey sort_key;
+    bool sort_desc;
+    bool load_typing;           /* the "type a path" input is active */
+    /* Dialog hit boxes (0-based), recomputed each dialog frame for the mouse. */
+    int dlg_sort_row, dlg_sort_c0[3], dlg_sort_c1[3];
+    int dlg_typepath_row;
+    int dlg_list_row0;          /* screen row of the first visible entry */
+
+    /* Confirm (UI_CONFIRM): a y/n over a pending action. */
+    ConfirmAction confirm_action;
+    char confirm_path[1300];    /* the file the action targets */
+    char confirm_msg[320];      /* the question shown */
+    UiMode confirm_return;      /* mode to return to on cancel/after */
 
     /* Left-drag panning. While the left button is held, the camera is recomputed
        from the anchor captured on press so the grabbed point stays under the
@@ -365,9 +418,6 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
     } else if (app->mode == UI_JUMP) {
         appendf(buf, cap, n, " JUMP   Go to generation: " ANSI_REVERSE "%ld" ANSI_RESET
                 "   (now: %ld)" EOL EOL, app->jump_field, app->gen);
-    } else if (app->mode == UI_FILE) {
-        appendf(buf, cap, n, " %s   File: " ANSI_REVERSE "%s " ANSI_RESET EOL EOL,
-                app->file_saving ? "SAVE" : "LOAD", app->file_buf);
     } else if (app->mode == UI_EDIT) {
         appendf(buf, cap, n,
                 " EDIT   Cursor: (%d,%d)   Live: %zu" EOL EOL,
@@ -404,11 +454,6 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
         appendf(buf, cap, n,
                 " Type a generation (forward or back)   Backspace delete   "
                 "Enter jump   Esc cancel" CLR_EOL);
-    } else if (app->mode == UI_FILE) {
-        appendf(buf, cap, n,
-                " Type a %s filename (.rle)   Backspace delete   Enter %s   Esc cancel" CLR_EOL,
-                app->file_saving ? "save" : "load",
-                app->file_saving ? "save" : "load");
     } else if (app->mode == UI_EDIT) {
         appendf(buf, cap, n,
                 " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
@@ -429,6 +474,23 @@ static uint64_t fnv1a(const char *data, size_t len) {
     return h;
 }
 
+/* Record where the button bar and each button land on screen (0-based, matching
+   the decoded SGR mouse position) so handle_mouse can hit-test clicks. The bar is
+   always the 3rd controls line — the mode's status block is two lines (see
+   append_controls) — so its row is img_rows + 2. Columns mirror exactly what the
+   bar loop emits: a leading space, then "[label]" (strlen+2 wide) and a trailing
+   space per button. */
+static void compute_button_geometry(App *app, int img_rows) {
+    app->bar_row = img_rows + 2;
+    int col = 1; /* first button's '[' sits just after the single leading space */
+    for (int b = 0; b < BTN_COUNT; b++) {
+        int w = (int)strlen(BUTTON_LABELS[b]) + 2; /* the bracketed "[label]" */
+        app->btn_col0[b] = col;
+        app->btn_col1[b] = col + w;
+        col += w + 1; /* + trailing space */
+    }
+}
+
 /* Emit an already-encoded sixel image plus the controls below it. Re-emits the
    image only when it actually changed since the last frame (see the dedup note),
    so idle frames cost nothing and do not pile images into terminals that retain
@@ -436,6 +498,7 @@ static uint64_t fnv1a(const char *data, size_t len) {
 static void emit_frame(App *app, char *img, size_t img_len,
                        int img_w, int img_h, int cch) {
     const int img_rows = (img_h + cch - 1) / cch; /* char rows the image spans */
+    compute_button_geometry(app, img_rows);
 
     const uint64_t hash = fnv1a(img, img_len);
     const bool image_changed = !app->sx_drawn || hash != app->sx_last_hash ||
@@ -468,12 +531,144 @@ static void emit_frame(App *app, char *img, size_t img_len,
     fflush(stdout);
 }
 
+/* Human-readable file size (B/K/M). */
+static void human_size(long bytes, char *buf, size_t cap) {
+    if (bytes < 1024) snprintf(buf, cap, "%ldB", bytes);
+    else if (bytes < 1024 * 1024) snprintf(buf, cap, "%.1fK", bytes / 1024.0);
+    else snprintf(buf, cap, "%.1fM", bytes / (1024.0 * 1024.0));
+}
+
+/* Local "YYYY-MM-DD HH:MM" for a unix time. */
+static void fmt_mtime(long t, char *buf, size_t cap) {
+    time_t tt = (time_t)t;
+    struct tm tm;
+    localtime_r(&tt, &tm);
+    strftime(buf, cap, "%Y-%m-%d %H:%M", &tm);
+}
+
+/* Draw a full-screen text dialog (save / load / confirm) in place of the world
+   image, and record hit boxes for the mouse. The image is force-redrawn on the
+   next normal frame (sx_drawn cleared). */
+static void render_dialog(App *app) {
+    int cols, rows;
+    if (!terminal_size(&cols, &rows)) { cols = 80; rows = 24; }
+    if (rows < 8) rows = 8;
+    if (cols < 24) cols = 24;
+
+    char dir[768];
+    if (!settings_saves_dir(dir, sizeof(dir))) snprintf(dir, sizeof(dir), "(unknown)");
+
+    size_t bcap = (size_t)(rows + 6) * (size_t)(cols + 64) + 512;
+    char *buf = malloc(bcap);
+    if (buf == NULL) return;
+    size_t n = 0;
+    appendf(buf, bcap, &n, ANSI_HOME);
+
+    app->bar_row = -1;
+    app->dlg_sort_row = app->dlg_typepath_row = app->dlg_list_row0 = -1;
+
+    if (app->mode == UI_SAVE_NAME) {
+        appendf(buf, bcap, &n, " Save pattern" EOL " Folder: %s" EOL EOL, dir);
+        appendf(buf, bcap, &n, " Save as: " ANSI_REVERSE "%s " ANSI_RESET
+                ".rle" EOL EOL, app->file_buf);
+        appendf(buf, bcap, &n,
+                " Type a name   Enter save   Esc cancel"
+                "   (.rle is added automatically)" EOL);
+        if (app->msg[0]) appendf(buf, bcap, &n, EOL " %s" EOL, app->msg);
+    } else if (app->mode == UI_CONFIRM) {
+        appendf(buf, bcap, &n, EOL " %s" EOL EOL, app->confirm_msg);
+        appendf(buf, bcap, &n, " y = yes     n / Esc = no" EOL);
+    } else { /* UI_LOAD_LIST */
+        appendf(buf, bcap, &n, " Load pattern" EOL " Folder: %s" EOL EOL, dir);
+
+        /* Sort row (row index 3). */
+        app->dlg_sort_row = 3;
+        appendf(buf, bcap, &n, " Sort: ");
+        int col = 8; /* " Sort: " = 1 space + 6 chars + the space after ':' */
+        const char *snames[3] = {"Name", "Size", "Modified"};
+        for (int k = 0; k < 3; k++) {
+            int w = (int)strlen(snames[k]) + 2;
+            app->dlg_sort_c0[k] = col;
+            app->dlg_sort_c1[k] = col + w;
+            if ((int)app->sort_key == k) {
+                appendf(buf, bcap, &n, ANSI_REVERSE "[%s]" ANSI_RESET " ", snames[k]);
+            } else {
+                appendf(buf, bcap, &n, "[%s] ", snames[k]);
+            }
+            col += w + 1;
+        }
+        appendf(buf, bcap, &n, "(%s)" EOL, app->sort_desc ? "desc" : "asc");
+
+        /* Type-a-path row (row index 4). */
+        app->dlg_typepath_row = 4;
+        if (app->load_typing) {
+            appendf(buf, bcap, &n, " Path: " ANSI_REVERSE "%s " ANSI_RESET
+                    "  Enter load   Esc back" EOL, app->file_buf);
+        } else {
+            appendf(buf, bcap, &n, " [Type a path…]  (press /)" EOL);
+        }
+
+        /* Column header (row 5) + list (from row 6). */
+        int namew = cols - 32;
+        if (namew < 10) namew = 10;
+        appendf(buf, bcap, &n, " %-*s %8s   %s" EOL, namew, "NAME", "SIZE", "MODIFIED");
+
+        app->dlg_list_row0 = 6;
+        int visible = rows - app->dlg_list_row0 - 1; /* leave the footer row */
+        if (visible < 1) visible = 1;
+        app->save_visible = visible;
+        if (app->save_sel < app->save_top) app->save_top = app->save_sel;
+        if (app->save_sel >= app->save_top + visible)
+            app->save_top = app->save_sel - visible + 1;
+        if (app->save_top < 0) app->save_top = 0;
+
+        if (app->save_count == 0) {
+            appendf(buf, bcap, &n,
+                    " (no saved patterns here — press / to type a path)" EOL);
+            for (int i = 1; i < visible; i++) appendf(buf, bcap, &n, EOL);
+        } else {
+            for (int i = 0; i < visible; i++) {
+                int idx = app->save_top + i;
+                if (idx >= app->save_count) { appendf(buf, bcap, &n, EOL); continue; }
+                SaveEntry *se = &app->saves[idx];
+                char szb[24], tb[24], nm[256];
+                human_size(se->size, szb, sizeof(szb));
+                fmt_mtime(se->mtime, tb, sizeof(tb));
+                snprintf(nm, sizeof(nm), "%.*s", namew, se->name);
+                if (idx == app->save_sel) {
+                    appendf(buf, bcap, &n, ANSI_REVERSE " %-*s %8s   %s" ANSI_RESET EOL,
+                            namew, nm, szb, tb);
+                } else {
+                    appendf(buf, bcap, &n, " %-*s %8s   %s" EOL, namew, nm, szb, tb);
+                }
+            }
+        }
+        appendf(buf, bcap, &n,
+                " Up/Down move   Enter/click load   d delete   / type path   "
+                "Esc cancel" CLR_EOL);
+    }
+
+    appendf(buf, bcap, &n, ANSI_CLR_BELOW);
+    fwrite(buf, 1, n, stdout);
+    fflush(stdout);
+    free(buf);
+
+    /* Next normal frame must repaint the image the dialog covered. */
+    app->sx_drawn = false;
+    app->sx_last_w = app->sx_last_h = -1;
+}
+
 /* Render the world: build the image straight from the sparse live-cell set,
    plotting only the O(population) cells that fall inside the viewport instead of
    probing every one of its (up to millions of) cells. Returns false if the
    layout cannot be computed (no pixel size, allocation failed); the caller then
    simply skips the frame. */
 static bool render(App *app) {
+    if (app->mode == UI_SAVE_NAME || app->mode == UI_LOAD_LIST ||
+        app->mode == UI_CONFIRM) {
+        render_dialog(app);
+        return true;
+    }
     int cols, rows, xpx, ypx;
     if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
         return false;
@@ -638,14 +833,6 @@ static void adjust_speed(App *app, int dir) {
     app->delay_ms = d;
 }
 
-/* Enter the file prompt to save or load an RLE pattern. */
-static void enter_file(App *app, bool saving) {
-    app->mode = UI_FILE;
-    app->file_saving = saving;
-    app->file_len = 0;
-    app->file_buf[0] = '\0';
-}
-
 /* Gather every live cell into a growable (x, y) array (for saving). */
 typedef struct {
     int *xy;
@@ -668,8 +855,8 @@ static void gather_cb(int x, int y, void *ud) {
     v->n++;
 }
 
-/* Save the whole world to the RLE file named in file_buf. */
-static void do_save(App *app) {
+/* Write the whole current world to `path` as RLE, reporting on the status line. */
+static void write_current_to(App *app, const char *path) {
     CellVec v = {0};
     engine_query(app->engine, INT_MIN, INT_MIN, INT_MAX, INT_MAX, gather_cb, &v);
     if (v.oom) {
@@ -678,10 +865,13 @@ static void do_save(App *app) {
         return;
     }
     char err[128] = {0};
-    bool ok = rle_save(app->file_buf, v.xy, v.n, err, sizeof(err));
+    bool ok = rle_save(path, v.xy, v.n, err, sizeof(err));
+    size_t nn = v.n;
     free(v.xy);
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
     if (ok) {
-        snprintf(app->msg, sizeof(app->msg), "Saved %zu cells to %s", v.n, app->file_buf);
+        snprintf(app->msg, sizeof(app->msg), "Saved %zu cells to %s", nn, base);
     } else {
         snprintf(app->msg, sizeof(app->msg), "Save failed: %s", err);
     }
@@ -722,16 +912,223 @@ static bool load_rle_file(App *app, const char *path, size_t *out_count,
     return true;
 }
 
-/* Load an RLE pattern named by the in-app file prompt, reporting the result on
-   the status line. */
-static void do_load(App *app) {
-    size_t count = 0;
-    char err[128] = {0};
-    if (!load_rle_file(app, app->file_buf, &count, err, sizeof(err))) {
-        snprintf(app->msg, sizeof(app->msg), "Load failed: %s", err);
+static bool has_rle_ext(const char *path); /* defined below */
+
+/* ---- Saves directory scanning + sorting ---------------------------------- */
+
+#define SAVES_MAX 1000 /* safety cap on entries scanned into the load list */
+
+/* qsort comparator state (single-threaded UI, so file-scope is fine). */
+static SortKey g_sort_key;
+static bool g_sort_desc;
+static int save_cmp(const void *pa, const void *pb) {
+    const SaveEntry *a = pa, *b = pb;
+    int r = 0;
+    switch (g_sort_key) {
+        case SORT_NAME: r = strcasecmp(a->name, b->name); break;
+        case SORT_SIZE: r = (a->size > b->size) - (a->size < b->size); break;
+        case SORT_MTIME: r = (a->mtime > b->mtime) - (a->mtime < b->mtime); break;
+    }
+    if (r == 0) r = strcmp(a->name, b->name); /* stable tie-break by name */
+    return g_sort_desc ? -r : r;
+}
+static void sort_saves(App *app) {
+    g_sort_key = app->sort_key;
+    g_sort_desc = app->sort_desc;
+    if (app->save_count > 1) {
+        qsort(app->saves, (size_t)app->save_count, sizeof(SaveEntry), save_cmp);
+    }
+}
+
+/* (Re)scan the saves directory into app->saves, then sort and clamp selection. */
+static void scan_saves(App *app) {
+    free(app->saves);
+    app->saves = NULL;
+    app->save_count = 0;
+
+    char dir[768];
+    if (settings_saves_dir(dir, sizeof(dir))) {
+        DIR *d = opendir(dir);
+        if (d != NULL) {
+            size_t cap = 0;
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL && app->save_count < SAVES_MAX) {
+                if (e->d_name[0] == '.') continue;      /* skip dotfiles/./.. */
+                if (!has_rle_ext(e->d_name)) continue;
+                char full[1280];
+                snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+                struct stat st;
+                if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+                if ((size_t)app->save_count == cap) {
+                    size_t nc = cap ? cap * 2 : 64;
+                    SaveEntry *ns = realloc(app->saves, nc * sizeof(SaveEntry));
+                    if (ns == NULL) break;
+                    app->saves = ns;
+                    cap = nc;
+                }
+                SaveEntry *se = &app->saves[app->save_count++];
+                snprintf(se->name, sizeof(se->name), "%s", e->d_name);
+                se->size = (long)st.st_size;
+                se->mtime = (long)st.st_mtime;
+            }
+            closedir(d);
+        }
+    }
+    sort_saves(app);
+    if (app->save_sel >= app->save_count) app->save_sel = app->save_count - 1;
+    if (app->save_sel < 0) app->save_sel = 0;
+    app->save_top = 0;
+}
+
+/* ---- Confirm overlay ----------------------------------------------------- */
+
+static bool do_load_path(App *app, const char *path); /* fwd */
+
+static void enter_confirm(App *app, ConfirmAction action, const char *path,
+                          const char *msg, UiMode return_to) {
+    app->confirm_action = action;
+    snprintf(app->confirm_path, sizeof(app->confirm_path), "%s", path ? path : "");
+    snprintf(app->confirm_msg, sizeof(app->confirm_msg), "%s", msg);
+    app->confirm_return = return_to;
+    app->mode = UI_CONFIRM;
+}
+
+/* Carry out (or cancel) the pending confirm action and pick the next mode. */
+static void resolve_confirm(App *app, bool yes) {
+    if (!yes) {
+        app->mode = app->confirm_return;
         return;
     }
-    snprintf(app->msg, sizeof(app->msg), "Loaded %zu cells from %s", count, app->file_buf);
+    switch (app->confirm_action) {
+        case CONFIRM_OVERWRITE:
+            write_current_to(app, app->confirm_path);
+            app->mode = UI_NORMAL;
+            break;
+        case CONFIRM_REPLACE:
+            if (!do_load_path(app, app->confirm_path)) {
+                app->mode = app->confirm_return; /* load failed: back to list */
+            } /* success sets UI_NORMAL inside do_load_path */
+            break;
+        case CONFIRM_DELETE:
+            if (remove(app->confirm_path) == 0) {
+                snprintf(app->msg, sizeof(app->msg), "Deleted");
+            } else {
+                snprintf(app->msg, sizeof(app->msg), "Delete failed");
+            }
+            app->mode = UI_LOAD_LIST;
+            scan_saves(app);
+            break;
+    }
+}
+
+/* ---- Load ---------------------------------------------------------------- */
+
+/* Load `path`, set the status line, and drop to normal mode on success (leaving
+   the mode unchanged on failure so the caller can stay in the list). */
+static bool do_load_path(App *app, const char *path) {
+    size_t count = 0;
+    char err[128] = {0};
+    if (!load_rle_file(app, path, &count, err, sizeof(err))) {
+        snprintf(app->msg, sizeof(app->msg), "Load failed: %s", err);
+        return false;
+    }
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    snprintf(app->msg, sizeof(app->msg), "Loaded %zu cells from %s", count, base);
+    app->mode = UI_NORMAL;
+    return true;
+}
+
+/* Load `path`, first confirming if it would replace a non-empty world. */
+static void request_load(App *app, const char *path) {
+    if (engine_population(app->engine) > 0) {
+        enter_confirm(app, CONFIRM_REPLACE, path,
+                      "Replace the current world with this pattern? (y/n)",
+                      app->mode);
+        return;
+    }
+    do_load_path(app, path);
+}
+
+static void load_selected(App *app) {
+    if (app->save_count == 0) return;
+    char dir[768];
+    if (!settings_saves_dir(dir, sizeof(dir))) return;
+    char path[1280];
+    snprintf(path, sizeof(path), "%s/%s", dir, app->saves[app->save_sel].name);
+    request_load(app, path);
+}
+
+static void delete_selected(App *app) {
+    if (app->save_count == 0) return;
+    char dir[768];
+    if (!settings_saves_dir(dir, sizeof(dir))) return;
+    char path[1280];
+    snprintf(path, sizeof(path), "%s/%s", dir, app->saves[app->save_sel].name);
+    char q[320];
+    snprintf(q, sizeof(q), "Delete \"%.240s\"? (y/n)", app->saves[app->save_sel].name);
+    enter_confirm(app, CONFIRM_DELETE, path, q, UI_LOAD_LIST);
+}
+
+/* ---- Save ---------------------------------------------------------------- */
+
+/* A save filename must be non-empty, not hidden/traversing, and hold no slash so
+   it stays inside the saves directory. */
+static bool valid_save_name(const char *s) {
+    if (s[0] == '\0' || s[0] == '.') return false;
+    for (const char *p = s; *p; p++) {
+        if (*p == '/') return false;
+    }
+    return true;
+}
+
+/* Try to save the typed name; opens an overwrite confirm if the file exists. */
+static void request_save(App *app) {
+    if (!valid_save_name(app->file_buf)) {
+        snprintf(app->msg, sizeof(app->msg),
+                 "Invalid name (no empty, leading '.', or '/')");
+        return;
+    }
+    char dir[768];
+    if (!settings_saves_dir(dir, sizeof(dir)) || !settings_mkdirs(dir)) {
+        snprintf(app->msg, sizeof(app->msg), "Cannot create saves directory");
+        return;
+    }
+    char path[1280];
+    if (has_rle_ext(app->file_buf)) {
+        snprintf(path, sizeof(path), "%s/%s", dir, app->file_buf);
+    } else {
+        snprintf(path, sizeof(path), "%s/%s.rle", dir, app->file_buf);
+    }
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        const char *base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        char q[320];
+        snprintf(q, sizeof(q), "Overwrite \"%.240s\"? (y/n)", base);
+        enter_confirm(app, CONFIRM_OVERWRITE, path, q, UI_SAVE_NAME);
+        return;
+    }
+    write_current_to(app, path);
+    app->mode = UI_NORMAL;
+}
+
+/* ---- Entering the dialogs ------------------------------------------------ */
+
+static void enter_save(App *app) {
+    app->mode = UI_SAVE_NAME;
+    app->file_len = 0;
+    app->file_buf[0] = '\0';
+    app->msg[0] = '\0';
+}
+
+static void enter_load(App *app) {
+    app->mode = UI_LOAD_LIST;
+    app->load_typing = false;
+    app->file_len = 0;
+    app->file_buf[0] = '\0';
+    app->msg[0] = '\0';
+    scan_saves(app);
 }
 
 /* Enter the jump prompt (type a target generation). */
@@ -856,6 +1253,12 @@ static void activate_button(App *app) {
         case BTN_JUMP:
             enter_jump(app);
             break;
+        case BTN_SAVE:
+            enter_save(app);
+            break;
+        case BTN_LOAD:
+            enter_load(app);
+            break;
     }
 }
 
@@ -942,6 +1345,22 @@ static void handle_mouse(App *app) {
         return;
     }
     if (m.button == 0 && m.pressed && !m.motion) {
+        /* Clicks anywhere in the controls area (status lines + button bar) never
+           pan the world. A click on the bar row selects and activates its button;
+           the two status lines just above it are swallowed. Everything above the
+           controls is the image, where a press begins a pan. */
+        if (app->mode == UI_NORMAL && app->bar_row >= 0 && m.y >= app->bar_row - 2) {
+            if (m.y == app->bar_row) {
+                for (int b = 0; b < BTN_COUNT; b++) {
+                    if (m.x >= app->btn_col0[b] && m.x < app->btn_col1[b]) {
+                        app->selected = b;
+                        activate_button(app);
+                        break;
+                    }
+                }
+            }
+            return;
+        }
         app->dragging = true;
         app->drag_mx = m.x;
         app->drag_my = m.y;
@@ -1006,9 +1425,9 @@ static void handle_normal(App *app, Key key) {
                 } else if (c == '-' || c == '_') {
                     adjust_speed(app, -1);
                 } else if (c == 's' || c == 'S') {
-                    enter_file(app, true);
+                    enter_save(app);
                 } else if (c == 'l' || c == 'L') {
-                    enter_file(app, false);
+                    enter_load(app);
                 }
             }
             break;
@@ -1097,60 +1516,159 @@ static void handle_jump(App *app, Key key) {
     }
 }
 
-/* Type a filename, then save or load an RLE pattern. Printable characters are
-   appended (including 'q', recovered via terminal_char()); Ctrl-C still quits. */
-static void handle_file(App *app, Key key) {
-    switch (key) {
-        case KEY_BACKSPACE:
-            if (app->file_len > 0) app->file_buf[--app->file_len] = '\0';
-            break;
-        case KEY_SPACE:
-            if (app->file_len < FILE_BUF_MAX) {
-                app->file_buf[app->file_len++] = ' ';
-                app->file_buf[app->file_len] = '\0';
-            }
-            break;
-        case KEY_ENTER:
-            app->mode = UI_NORMAL;
-            if (app->file_len > 0) {
-                if (app->file_saving) do_save(app);
-                else do_load(app);
-            }
-            break;
-        case KEY_ESC:
-            app->mode = UI_NORMAL; /* cancel */
-            break;
-        case KEY_QUIT: {
-            /* 'q'/'Q' are literal filename characters here; only Ctrl-C quits. */
-            int c = terminal_char();
-            if (c == 0x03) {
-                app->running = false;
-            } else if (app->file_len < FILE_BUF_MAX) {
-                app->file_buf[app->file_len++] = (char)c;
-                app->file_buf[app->file_len] = '\0';
-            }
-            break;
+/* Edit the shared text field (save filename / load path). Sets *quit on Ctrl-C.
+   'q'/'Q' are literal characters here (recovered via terminal_char()). */
+static void file_buf_key(App *app, Key key, int *quit) {
+    *quit = 0;
+    if (key == KEY_BACKSPACE) {
+        if (app->file_len > 0) app->file_buf[--app->file_len] = '\0';
+    } else if (key == KEY_SPACE) {
+        if (app->file_len < FILE_BUF_MAX) {
+            app->file_buf[app->file_len++] = ' ';
+            app->file_buf[app->file_len] = '\0';
         }
+    } else if (key == KEY_QUIT) {
+        int c = terminal_char();
+        if (c == 0x03) {
+            *quit = 1;
+        } else if (app->file_len < FILE_BUF_MAX) {
+            app->file_buf[app->file_len++] = (char)c;
+            app->file_buf[app->file_len] = '\0';
+        }
+    } else if (key == KEY_OTHER) {
+        int c = terminal_char();
+        if (c >= 0x20 && c < 0x7f && app->file_len < FILE_BUF_MAX) {
+            app->file_buf[app->file_len++] = (char)c;
+            app->file_buf[app->file_len] = '\0';
+        }
+    }
+}
+
+/* Change the load-list sort key (toggling the order if the key is unchanged;
+   otherwise pick a sensible default order: names ascending, size/date newest or
+   largest first). */
+static void set_sort(App *app, SortKey k) {
+    if (app->sort_key == k) {
+        app->sort_desc = !app->sort_desc;
+    } else {
+        app->sort_key = k;
+        app->sort_desc = (k != SORT_NAME);
+    }
+    sort_saves(app);
+}
+
+/* Mouse inside the load list: wheel scrolls the selection; a left click on a
+   sort header, the type-a-path line, or an entry acts on it (a row click loads). */
+static void handle_dialog_mouse(App *app) {
+    MouseEvent m = terminal_mouse();
+    if (m.button == 64 || m.button == 65) { /* wheel */
+        if (m.pressed) {
+            if (m.button == 64 && app->save_sel > 0) app->save_sel--;
+            if (m.button == 65 && app->save_sel < app->save_count - 1) app->save_sel++;
+        }
+        return;
+    }
+    if (!(m.button == 0 && m.pressed && !m.motion) || app->load_typing) return;
+    if (m.y == app->dlg_sort_row) {
+        for (int k = 0; k < 3; k++) {
+            if (m.x >= app->dlg_sort_c0[k] && m.x < app->dlg_sort_c1[k]) {
+                set_sort(app, (SortKey)k);
+                return;
+            }
+        }
+        return;
+    }
+    if (m.y == app->dlg_typepath_row) {
+        app->load_typing = true;
+        app->file_len = 0;
+        app->file_buf[0] = '\0';
+        return;
+    }
+    if (app->dlg_list_row0 >= 0 && m.y >= app->dlg_list_row0) {
+        int idx = app->save_top + (m.y - app->dlg_list_row0);
+        if (idx >= 0 && idx < app->save_count) {
+            app->save_sel = idx;
+            load_selected(app);
+        }
+    }
+}
+
+/* UI_SAVE_NAME: type a name, Enter saves (may open an overwrite confirm). */
+static void handle_save_name(App *app, Key key) {
+    if (key == KEY_ENTER) {
+        if (app->file_len > 0) request_save(app);
+        return;
+    }
+    if (key == KEY_ESC) { app->mode = UI_NORMAL; return; }
+    int quit;
+    file_buf_key(app, key, &quit);
+    if (quit) app->running = false;
+}
+
+/* UI_LOAD_LIST: browse/sort/pick a saved pattern, or type an arbitrary path. */
+static void handle_load_list(App *app, Key key) {
+    if (app->load_typing) {
+        if (key == KEY_ENTER) {
+            if (app->file_len > 0) request_load(app, app->file_buf);
+            app->load_typing = false;
+            return;
+        }
+        if (key == KEY_ESC) { app->load_typing = false; return; }
+        int quit;
+        file_buf_key(app, key, &quit);
+        if (quit) app->running = false;
+        return;
+    }
+    if (key == KEY_MOUSE) { handle_dialog_mouse(app); return; }
+    switch (key) {
+        case KEY_UP:   if (app->save_sel > 0) app->save_sel--; break;
+        case KEY_DOWN: if (app->save_sel < app->save_count - 1) app->save_sel++; break;
+        case KEY_ENTER:
+        case KEY_SPACE: load_selected(app); break;
+        case KEY_ESC:  app->mode = UI_NORMAL; break;
+        case KEY_QUIT: app->running = false; break; /* q / Ctrl-C */
         case KEY_OTHER: {
             int c = terminal_char();
-            if (c >= 0x20 && c < 0x7f && app->file_len < FILE_BUF_MAX) {
-                app->file_buf[app->file_len++] = (char)c;
-                app->file_buf[app->file_len] = '\0';
+            if (c == 'n' || c == 'N') set_sort(app, SORT_NAME);
+            else if (c == 's' || c == 'S') set_sort(app, SORT_SIZE);
+            else if (c == 'm' || c == 'M') set_sort(app, SORT_MTIME);
+            else if (c == 'd' || c == 'D') delete_selected(app);
+            else if (c == '/') {
+                app->load_typing = true;
+                app->file_len = 0;
+                app->file_buf[0] = '\0';
             }
             break;
         }
-        default:
-            break;
+        default: break;
+    }
+}
+
+/* UI_CONFIRM: y = yes; n / Esc = no; Ctrl-C still quits. */
+static void handle_confirm(App *app, Key key) {
+    if (key == KEY_ESC) { resolve_confirm(app, false); return; }
+    if (key == KEY_QUIT) {
+        int c = terminal_char();
+        if (c == 0x03) app->running = false; /* Ctrl-C */
+        else resolve_confirm(app, false);    /* 'q' = no */
+        return;
+    }
+    if (key == KEY_OTHER) {
+        int c = terminal_char();
+        if (c == 'y' || c == 'Y') resolve_confirm(app, true);
+        else if (c == 'n' || c == 'N') resolve_confirm(app, false);
     }
 }
 
 /* Dispatch a key to the handler for the current mode. */
 static void handle_key(App *app, Key key) {
     switch (app->mode) {
-        case UI_EDIT: handle_edit(app, key); break;
-        case UI_JUMP: handle_jump(app, key); break;
-        case UI_FILE: handle_file(app, key); break;
-        default:      handle_normal(app, key); break;
+        case UI_EDIT:      handle_edit(app, key); break;
+        case UI_JUMP:      handle_jump(app, key); break;
+        case UI_SAVE_NAME: handle_save_name(app, key); break;
+        case UI_LOAD_LIST: handle_load_list(app, key); break;
+        case UI_CONFIRM:   handle_confirm(app, key); break;
+        default:           handle_normal(app, key); break;
     }
 }
 
@@ -1158,14 +1676,16 @@ static void handle_key(App *app, Key key) {
 /* Setup / main loop                                                  */
 /* ------------------------------------------------------------------ */
 
-/* Build the default pattern path: <config-dir>/default.cells. Returns false if
-   the config directory cannot be determined. */
-static bool default_config_path(char *buf, size_t cap) {
-    char dir[512];
-    if (!settings_config_dir(dir, sizeof(dir))) {
+/* Build the default pattern path: <saves-dir>/default.rle. The startup default
+   lives in the saves directory (with the user's own saves), so the config
+   directory holds only configuration. Returns false if the saves directory
+   cannot be determined. */
+static bool default_pattern_path(char *buf, size_t cap) {
+    char dir[768];
+    if (!settings_saves_dir(dir, sizeof(dir))) {
         return false;
     }
-    snprintf(buf, cap, "%s/default.cells", dir);
+    snprintf(buf, cap, "%s/default.rle", dir);
     return true;
 }
 
@@ -1179,10 +1699,11 @@ static bool has_rle_ext(const char *path) {
            (path[n - 1] == 'e' || path[n - 1] == 'E');
 }
 
-/* Load a `.cells` pattern into the dense seed board. RLE `-f` files do NOT come
-   here — main routes them straight into the sparse engine (load_rle_file) so a
-   big pattern is never clipped to the -w/-h seed board. This path is only the
-   `.cells` plaintext format (small bundled patterns) and the default file. */
+/* Load a `.cells` pattern into the dense seed board, or fall back to a random
+   fill. RLE files do NOT come here — main routes both an explicit `-f *.rle` and
+   the startup default (saves/default.rle) straight into the sparse engine via
+   load_rle_file, so a big pattern is never clipped to the -w/-h seed board. This
+   path handles only an explicit `.cells` `-f` and the random start. */
 static bool build_initial(Board *initial, const Options *opt) {
     if (opt->config_path != NULL) {
         /* An explicit -f must succeed; a bad path is a hard error. */
@@ -1193,13 +1714,6 @@ static bool build_initial(Board *initial, const Options *opt) {
             fprintf(stderr, "Error loading config: %s\n", err);
             return false;
         }
-        return true;
-    }
-
-    /* No -f: try the default config file, then silently fall back to random. */
-    char path[1024];
-    if (default_config_path(path, sizeof(path)) &&
-        config_load_file(initial, path, NULL, 0)) {
         return true;
     }
     board_randomize(initial, opt->density);
@@ -1273,6 +1787,8 @@ int main(int argc, char **argv) {
     app.view_h = opt.height;
     app.infinite_cell_px = INFINITE_CELL_PX;
     app.cells_per_px = 1;
+    app.sort_key = SORT_MTIME; /* load list defaults to newest-first */
+    app.sort_desc = true;
 
     app.engine = engine_new();
     app.history = history_new(HISTORY_CAP);
@@ -1292,11 +1808,12 @@ int main(int argc, char **argv) {
     sa_winch.sa_handler = on_winch;
     sigaction(SIGWINCH, &sa_winch, NULL);
 
-    /* Seed the world. An RLE `-f` loads straight into the sparse engine (no dense
-       board, so a huge/sparse pattern is never clipped or over-allocated); every
-       other case (`.cells` `-f`, the default file, or a random start) lays out in
-       a transient dense seed board and hands it off. The world is unbounded from
-       here on. */
+    /* Seed the world. RLE loads (an explicit `-f *.rle`, or the startup default
+       saves/default.rle) go straight into the sparse engine — no dense board, so
+       a huge/sparse pattern is never clipped or over-allocated. An explicit
+       `.cells` `-f` and the random fallback lay out in a transient dense seed
+       board. The world is unbounded from here on. */
+    bool seeded = false;
     if (opt.config_path != NULL && has_rle_ext(opt.config_path)) {
         char err[256];
         if (!load_rle_file(&app, opt.config_path, NULL, err, sizeof(err))) {
@@ -1307,7 +1824,17 @@ int main(int argc, char **argv) {
             history_free(app.history);
             return 1;
         }
-    } else {
+        seeded = true;
+    } else if (opt.config_path == NULL) {
+        /* No -f: try the default pattern (saves/default.rle); a missing/bad file
+           is not an error — it just falls through to the random start. */
+        char dpath[1024];
+        if (default_pattern_path(dpath, sizeof(dpath)) &&
+            load_rle_file(&app, dpath, NULL, NULL, 0)) {
+            seeded = true;
+        }
+    }
+    if (!seeded) {
         Board initial;
         if (!board_init(&initial, opt.width, opt.height)) {
             fprintf(stderr, "Failed to allocate board\n");
@@ -1386,5 +1913,6 @@ int main(int argc, char **argv) {
     engine_free(app.engine);
     engine_snapshot_free(app.restart);
     history_free(app.history);
+    free(app.saves);
     return 0;
 }

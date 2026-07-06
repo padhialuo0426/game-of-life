@@ -59,22 +59,24 @@ include(GNUInstallDirs)
 # The executable goes to <prefix>/bin (i.e. ~/.local/bin by default).
 install(TARGETS game-of-life RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# Install the default pattern to the XDG config location, which is where the
-# program looks when run without -f. Evaluated at install time so it respects
-# the invoking user's HOME / XDG_CONFIG_HOME, and it never clobbers an existing
-# config the user may have customised.
+# Install the default pattern to the XDG *data* location's saves directory —
+# where the program looks when run without -f, and where the in-app Save/Load
+# browses. Kept separate from the config directory (settings) on purpose.
+# Evaluated at install time so it respects the invoking user's HOME /
+# XDG_DATA_HOME, and it never clobbers a default the user may have customised.
 install(CODE "
-    set(cfg_home \"\$ENV{XDG_CONFIG_HOME}\")
-    if(cfg_home STREQUAL \"\")
-        set(cfg_home \"\$ENV{HOME}/.config\")
+    set(data_home \"\$ENV{XDG_DATA_HOME}\")
+    if(data_home STREQUAL \"\")
+        set(data_home \"\$ENV{HOME}/.local/share\")
     endif()
-    set(dest \"\${cfg_home}/game-of-life/default.cells\")
+    set(saves \"\${data_home}/game-of-life/saves\")
+    set(dest \"\${saves}/default.rle\")
     if(EXISTS \"\${dest}\")
-        message(STATUS \"Keeping existing default config: \${dest}\")
+        message(STATUS \"Keeping existing default pattern: \${dest}\")
     else()
-        file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/patterns/default.cells\"
-             DESTINATION \"\${cfg_home}/game-of-life\")
-        message(STATUS \"Installed default config: \${dest}\")
+        file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/patterns/default.rle\"
+             DESTINATION \"\${saves}\")
+        message(STATUS \"Installed default pattern: \${dest}\")
     endif()
 ")
 

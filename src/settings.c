@@ -32,6 +32,29 @@ bool settings_config_dir(char *buf, size_t cap) {
     return false;
 }
 
+bool settings_data_dir(char *buf, size_t cap) {
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg != NULL && xdg[0] != '\0') {
+        snprintf(buf, cap, "%s/game-of-life", xdg);
+        return true;
+    }
+    const char *home = getenv("HOME");
+    if (home != NULL && home[0] != '\0') {
+        snprintf(buf, cap, "%s/.local/share/game-of-life", home);
+        return true;
+    }
+    return false;
+}
+
+bool settings_saves_dir(char *buf, size_t cap) {
+    char dir[768];
+    if (!settings_data_dir(dir, sizeof(dir))) {
+        return false;
+    }
+    snprintf(buf, cap, "%s/saves", dir);
+    return true;
+}
+
 bool settings_file_path(char *buf, size_t cap) {
     char dir[512];
     if (!settings_config_dir(dir, sizeof(dir))) {
@@ -62,6 +85,10 @@ static bool mkdir_p(const char *path) {
         return false;
     }
     return true;
+}
+
+bool settings_mkdirs(const char *path) {
+    return mkdir_p(path);
 }
 
 /* Locate the value token following "key": in a flat JSON object. Returns a

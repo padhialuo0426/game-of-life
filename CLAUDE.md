@@ -64,12 +64,42 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 - `src/terminal.{c,h}` — raw mode, key + SGR-mouse decoding, sixel detection
   (Primary DA query), alt-screen + mouse enable/disable.
 - `src/config.{c,h}` — load `.cells` plaintext patterns (centered into a board).
-- `src/settings.{c,h}` — JSON-ish persisted settings in `~/.config/game-of-life/settings.json`.
-- `src/main.c` — UI state machine (Normal/Edit only), render loop, input handling,
-  mouse pan/zoom, recenter/follow.
+- `src/settings.{c,h}` — JSON-ish persisted settings in `$XDG_CONFIG_HOME/game-of-life/
+  settings.json`, plus dir helpers: `settings_config_dir` (config),
+  `settings_data_dir`/`settings_saves_dir` (user data — saved patterns), `settings_mkdirs`.
+- `src/main.c` — UI state machine (Normal/Edit/Jump + Save/Load/Confirm dialogs),
+  render loop (world image + `render_dialog` for the full-screen browsers), input
+  handling, mouse pan/zoom + clickable button bar and dialog rows, recenter/follow.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Clickable buttons + a real Save/Load browser; saves split from
+  config.** Usability pass:
+  - **Buttons are mouse-clickable.** `emit_frame` records the bar row and each
+    button's column span (`compute_button_geometry`, 0-based to match decoded SGR
+    mouse); `handle_mouse` hit-tests a left click on the bar → select+activate.
+    Clicks in the controls area never pan. Added **Save** and **Load** buttons
+    (bar is now Start Pause Step Reset Edit Jump Save Load).
+  - **Save/Load dialogs** replace the old blind filename prompt (`UI_FILE` → three
+    modes `UI_SAVE_NAME`, `UI_LOAD_LIST`, `UI_CONFIRM`; `render_dialog()` takes the
+    full text area, hiding the sixel image and force-redrawing it on return).
+    *Save*: type a name (sanitised: no empty/leading-'.'/'/'), `.rle` auto-appended,
+    overwrite confirm. *Load*: a scrollable, sortable list (columns Name/Size/
+    Modified; `n`/`s`/`m` or click the header to sort, again reverses; default
+    Modified-desc), Enter/click a row loads, `d` deletes (confirm), `/` or the
+    `[Type a path…]` line loads an arbitrary path (so external files like
+    ~/Downloads/foo.rle still work), replace-world confirm when the world is
+    non-empty. All rows/headers mouse-clickable (shared hit-test). Dir shown in
+    the header. Keyboard `s`/`l` still open them.
+  - **Saves live in `$XDG_DATA_HOME/game-of-life/saves/`** (data), separate from
+    settings in `$XDG_CONFIG_HOME` (config). The startup default moved there as
+    **`default.rle`** (loaded via `load_rle_file`; `build_initial` no longer reads
+    `default.cells`). New `settings_data_dir`/`settings_saves_dir`/`settings_mkdirs`.
+    CMake installs `patterns/default.rle` into the saves dir (not `default.cells`
+    into config); uninstall removes `default.rle` + legacy `default.cells` but
+    never the user's own saves. PTY-verified: save→file on disk, load list +
+    sort + arrow-nav + delete + overwrite/replace confirms + mouse clicks on
+    buttons, sort headers, type-path, and rows.
 - **(Fedora) Responsive quit during a long jump + multi-core stepping.** For big
   worlds (a 250k-cell Turing machine jumping thousands of gens took 10+ min and
   wouldn't quit):

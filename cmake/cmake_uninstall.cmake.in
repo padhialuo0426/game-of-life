@@ -12,14 +12,15 @@ else()
     message(STATUS "Not found (skipped): ${exe}")
 endif()
 
-# --- Default config (respects HOME / XDG_CONFIG_HOME at run time) -----------
+# --- Config directory (respects HOME / XDG_CONFIG_HOME at run time) ----------
 set(cfg_home "$ENV{XDG_CONFIG_HOME}")
 if(cfg_home STREQUAL "")
     set(cfg_home "$ENV{HOME}/.config")
 endif()
 set(cfg_dir "${cfg_home}/game-of-life")
 
-# Remove the default pattern and the runtime settings file.
+# Remove the runtime settings file and any legacy default.cells (older versions
+# kept the default pattern here before it moved to the saves directory).
 foreach(name "default.cells" "settings.json")
     set(cfg "${cfg_dir}/${name}")
     if(EXISTS "${cfg}")
@@ -30,7 +31,6 @@ foreach(name "default.cells" "settings.json")
     endif()
 endforeach()
 
-# Remove the config directory only if it is now empty.
 if(EXISTS "${cfg_dir}")
     file(GLOB remaining "${cfg_dir}/*")
     if(remaining STREQUAL "")
@@ -38,3 +38,33 @@ if(EXISTS "${cfg_dir}")
         file(REMOVE_RECURSE "${cfg_dir}")
     endif()
 endif()
+
+# --- Data directory: the installed default pattern only ---------------------
+# Remove default.rle (which we installed) but NEVER the user's own saved
+# patterns; the saves and data directories are removed only if they end up empty.
+set(data_home "$ENV{XDG_DATA_HOME}")
+if(data_home STREQUAL "")
+    set(data_home "$ENV{HOME}/.local/share")
+endif()
+set(data_dir "${data_home}/game-of-life")
+set(saves_dir "${data_dir}/saves")
+
+set(defpat "${saves_dir}/default.rle")
+if(EXISTS "${defpat}")
+    message(STATUS "Removing ${defpat}")
+    file(REMOVE "${defpat}")
+else()
+    message(STATUS "Not found (skipped): ${defpat}")
+endif()
+
+foreach(dir "${saves_dir}" "${data_dir}")
+    if(EXISTS "${dir}")
+        file(GLOB remaining "${dir}/*")
+        if(remaining STREQUAL "")
+            message(STATUS "Removing empty directory ${dir}")
+            file(REMOVE_RECURSE "${dir}")
+        else()
+            message(STATUS "Keeping non-empty directory ${dir} (your saved patterns)")
+        endif()
+    endif()
+endforeach()

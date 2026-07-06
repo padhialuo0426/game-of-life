@@ -33,8 +33,8 @@ cmake --build --preset release
 默认安装到用户主目录（无需 root）：
 
 - 可执行文件 → `~/.local/bin/game-of-life`
-- 默认图案 → `~/.config/game-of-life/default.cells`
-  （遵循 `XDG_CONFIG_HOME`；不带 `-f` 运行时程序会自动加载它）
+- 默认图案 → `~/.local/share/game-of-life/saves/default.rle`
+  （遵循 `XDG_DATA_HOME`；不带 `-f` 运行时自动加载它，并与你自己的存档放在一起）
 
 ```sh
 cmake --build --preset release          # 先构建
@@ -48,9 +48,9 @@ cmake --build build/release --target uninstall
 说明：
 
 - 确保 `~/.local/bin` 在你的 `PATH` 中，才能直接敲 `game-of-life` 运行。
-- 安装绝不会覆盖你已自定义的默认配置。
-- **卸载**会删除可执行文件、默认图案和 `settings.json`（若配置目录
-  `game-of-life` 变空则一并删除）。
+- 安装绝不会覆盖你已自定义的 `default.rle`。
+- **卸载**会删除可执行文件、安装的 `default.rle` 和 `settings.json`（若配置/数据
+  目录变空则一并删除），但绝不会删除你自己保存的图案。
 - 系统级安装可覆盖前缀：
   `cmake --preset release -DCMAKE_INSTALL_PREFIX=/usr/local`，再
   `sudo cmake --install build/release`。
@@ -68,9 +68,10 @@ cmake --build build/release --target uninstall
 
 ## 操作
 
-图像下方有六个按钮：
-**Start / Pause / Step / Reset / Edit / Jump**
-（开始 / 暂停 / 单步 / 重置 / 编辑 / 跳转）。没有 Quit 按钮——在任何界面按 `q`
+图像下方有八个按钮：
+**Start / Pause / Step / Reset / Edit / Jump / Save / Load**
+（开始 / 暂停 / 单步 / 重置 / 编辑 / 跳转 / 保存 / 加载）。可用**鼠标点击**按钮，
+也可用 `Tab`/方向键移动选择再按 `Space`/`Enter`。没有 Quit 按钮——在任何界面按 `q`
 （或 `Ctrl-C`）即可退出。
 
 棋盘以 Sixel 位图绘制：每个细胞是一块方形像素，大小即当前缩放级别。
@@ -142,20 +143,26 @@ cmake --build build/release --target uninstall
 
 ### 保存与加载图案（RLE）
 
-按 **`s`** 保存或 **`l`** 加载,输入文件名,回车确认(`Esc` 取消;路径相对于你启动
-程序时所在的目录)。
+按 **`s`**（或 **Save** 按钮）保存、**`l`**（或 **Load** 按钮）加载,打开存取浏览器。
 
-格式是社区标准的 **RLE**(Golly 和 [LifeWiki](https://conwaylife.com/wiki/) 用的
-那种),所以你可以加载从 wiki 下载的枪、飞船等图案,也能把自己搭的存下来分享。加载会
-替换当前世界并把图案居中放到视口里;保存会写出当前世界的所有活细胞。例如一个滑翔机
-存出来是:
+- **保存** —— 输入名字回车即可;会自动补 `.rle` 后缀,写入你的存档目录。若重名会提示是否覆盖。
+- **加载** —— 一个可滚动的存档列表,带 **名字 / 大小 / 修改时间** 三列。方向键(或滚轮)移动,
+  回车或**点击某行**即加载,`d` 删除(需确认),`n`/`s`/`m`(或点击列标题)切换排序、再按一次反序。
+  若当前世界非空,加载前会先确认是否替换。要加载别处的文件,按 `/`(或点击 **[Type a path…]**)
+  输入任意路径——方便加载从 wiki 下载的图案。
+
+存档保存在 `$XDG_DATA_HOME/game-of-life/saves/`(通常是 `~/.local/share/game-of-life/saves/`),
+与设置分开存放。启动默认图案也放在那里,名为 `default.rle`。
+
+格式是社区标准的 **RLE**(Golly 和 [LifeWiki](https://conwaylife.com/wiki/) 用的那种)。
+加载会居中并缩放适配;保存会写出当前世界的所有活细胞。例如一个滑翔机存出来是:
 
 ```
 x = 3, y = 3, rule = B3/S23
 bo$2bo$3o!
 ```
 
-(`.cells` 格式仍用于默认图案和 `-f`;save/load 用 RLE,因为它对大图案更紧凑。)
+(`.cells` 格式仍可用于显式 `-f`;程序内 save/load 与默认图案用 RLE,因为它更紧凑。)
 
 ### Sixel 渲染
 
@@ -217,16 +224,16 @@ $XDG_CONFIG_HOME/game-of-life/settings.json
 ### 默认图案
 
 不带 `-f` 时，程序会查找默认图案文件
-`~/.config/game-of-life/default.cells`（遵循 `XDG_CONFIG_HOME`）。若存在则加载，
+`~/.local/share/game-of-life/saves/default.rle`（遵循 `XDG_DATA_HOME`）。若存在则加载，
 否则回退到随机开局（密度由 `-p` 指定，默认 0.25）。显式 `-f PATH` 读不到是硬错误，
 但默认文件缺失不是——只会触发随机回退。
 
-`make install` 会在那里放一个滑翔机作为 `default.cells`。若想换默认图案，
-覆盖它即可，例如：
+`make install` 会在那里放一个滑翔机作为 `default.rle`。若想换默认图案，覆盖它即可
+（也可以在程序内用名字 `default` 直接存一个覆盖它），例如：
 
 ```sh
-mkdir -p ~/.config/game-of-life
-cp patterns/pulsar.cells ~/.config/game-of-life/default.cells
+mkdir -p ~/.local/share/game-of-life/saves
+cp patterns/pulsar.rle ~/.local/share/game-of-life/saves/default.rle
 ```
 
 ### 内置图案
