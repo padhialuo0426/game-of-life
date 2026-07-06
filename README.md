@@ -6,9 +6,9 @@ An interactive terminal implementation of Conway's Game of Life, written in C
 and built with CMake. The board is drawn with **sixel** real-pixel graphics,
 with an on-screen button bar. The world can be **finite**
 (patterns that leave the edge vanish — the default), **toroidal** (edges wrap
-around), or **infinite** (an unbounded, sparsely-stored world you pan around by
-dragging with the mouse). Board size, world type and other parameters are
-remembered between runs.
+around), or **infinite** (an unbounded, sparsely-stored world you pan and zoom
+with the mouse). Board size, world type and other parameters are remembered
+between runs.
 
 > **Requires a sixel-capable terminal** (e.g. iTerm2, Konsole, WezTerm, foot,
 > `xterm -ti vt340`, mlterm, recent Windows Terminal). Terminals without sixel —
@@ -167,21 +167,27 @@ report that a sixel-capable terminal is required and exit.
   the live cells are kept, in a hash set), so memory and per-generation cost
   scale with the population, not with any area. A glider just keeps travelling
   forever. The terminal shows a **viewport** into this world; drag with the
-  mouse to move it around (see below).
+  mouse to pan and use the wheel to zoom (see below).
 
 Start with `--wrap` (toroidal) or `--infinite`, or switch any time in canvas
 mode. Finite and Toroidal use a dense grid engine; Infinite uses the sparse one.
 
-### Panning the infinite world
+### Exploring the infinite world (pan & zoom)
 
-In the infinite world the board no longer has a fixed size, so you pan the
-viewport by **dragging with the left mouse button** (grab-and-drag: the point
-under the cursor stays under it). The `Tab`/`Left`/`Right` keys move the button
-selection, exactly as in the bounded worlds. The status line shows the camera
-position `Cam: (x,y)` and the live-cell count. In edit mode the cursor roams the
-unbounded world with the arrow keys and the view follows it. Switching from
-Infinite back to a bounded world adopts the current viewport as the new finite
-canvas.
+In the infinite world the board no longer has a fixed size, so you explore it
+with the mouse:
+
+- **Drag with the left button** to pan (grab-and-drag: the point under the
+  cursor stays under it).
+- **Mouse wheel** to zoom, anchored on the cursor — from one pixel per cell when
+  zoomed all the way out, up to chunky cells.
+
+The `Tab`/`Left`/`Right` keys move the button selection, exactly as in the
+bounded worlds. The status line shows the camera position `Cam: (x,y)`, the
+live-cell count, and the current zoom (`Zoom: Npx`, pixels per cell). In edit
+mode the cursor roams the unbounded world with the arrow keys and the view
+follows it. Switching from Infinite back to a bounded world adopts the current
+viewport as the new finite canvas.
 
 ## Settings persistence
 

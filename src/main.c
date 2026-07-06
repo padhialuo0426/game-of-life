@@ -54,9 +54,14 @@
    unbounded (sparse hash-set engine) with a pannable viewport. */
 typedef enum { WORLD_FINITE, WORLD_TOROIDAL, WORLD_INFINITE } WorldType;
 
-/* Target pixels per cell for the infinite-world viewport in sixel mode (the
-   viewport is sized so cells render around this size; you pan to see more). */
+/* Pixels per cell for the infinite-world viewport in sixel mode. The viewport is
+   sized so cells render around this size; the mouse wheel changes it to zoom
+   (smaller = more cells visible). INFINITE_CELL_PX is the default; the range is
+   capped at SIXEL_CELL_MAX so the renderer's own cap never truncates the view. */
 #define INFINITE_CELL_PX 10
+#define INFINITE_CELL_MIN 1  /* 1 device pixel per cell — the real-pixel floor */
+#define INFINITE_CELL_MAX SIXEL_CELL_MAX
+#define ZOOM_STEP 2 /* pixels per wheel notch */
 
 /* Top-level interaction mode. */
 typedef enum { UI_NORMAL, UI_EDIT, UI_CANVAS } UiMode;
@@ -102,6 +107,7 @@ typedef struct {
     SparseWorld *sparse_initial;/* config restored by Stop */
     int cam_x, cam_y;           /* viewport top-left in world coordinates */
     int view_w, view_h;         /* current viewport size in cells */
+    int infinite_cell_px;       /* pixels per cell (mouse-wheel zoom level) */
     Board view;                 /* scratch dense snapshot of the viewport */
 
     /* Left-drag panning (WORLD_INFINITE). While the left button is held, the
@@ -190,7 +196,7 @@ static void print_usage(const char *prog) {
     printf("runs in ~/.config/game-of-life/settings.json.\n\n");
     printf("Buttons: Start Pause Step Reset Edit Canvas   (q quits from anywhere)\n");
     printf("Normal:  Tab/Left/Right select   Space/Enter activate   q quit\n");
-    printf("         (Infinite world: drag with the mouse to pan the view)\n");
+    printf("         (Infinite world: drag to pan, mouse wheel to zoom)\n");
     printf("Edit:    arrows move cursor   Space toggle cell   Tab/Esc leave\n");
     printf("Canvas:  type digits to set size   Up/Down field   Left/Right +/-1\n");
     printf("         Space cycles Finite/Toroidal/Infinite   Enter apply   Esc cancel\n");
@@ -281,15 +287,21 @@ static int clamp_dim(int v, int lo, int hi); /* defined below */
    a comfortable cell size (you pan to see beyond it). Mirrors the reservations
    made by the renderers so the image plus controls fit without scrolling. */
 static void infinite_viewport(const App *app, int *vw, int *vh) {
-    (void)app;
+    const int px = app->infinite_cell_px;
     int cols, rows, xpx, ypx;
     if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
         int cch = ypx / rows, ccw = xpx / cols;
         if (cch > 0 && ccw > 0) {
             int avail_w = xpx - ccw;
             int avail_h = ypx - SIXEL_UI_ROWS * cch;
-            *vw = clamp_dim(avail_w / INFINITE_CELL_PX, MIN_DIM, HARD_MAX_W);
-            *vh = clamp_dim(avail_h / INFINITE_CELL_PX, MIN_DIM, HARD_MAX_H);
+            /* One cell per pixel is the finest the display can show, so the
+               viewport cap is the terminal's own detected pixel size: vw fills
+               the width at any zoom on any display (Retina, 4K, 8K, …) with no
+               fixed limit. avail_w/avail_h come from the ioctl ws_xpixel/ypixel
+               (u16-bounded); an over-large snapshot simply fails to allocate and
+               prepare_view degrades gracefully rather than capping zoom. */
+            *vw = clamp_dim(avail_w / px, MIN_DIM, avail_w);
+            *vh = clamp_dim(avail_h / px, MIN_DIM, avail_h);
             return;
         }
     }
@@ -376,9 +388,9 @@ static void append_controls(const App *app, const Board *board,
         default:
             if (inf) {
                 appendf(buf, cap, n,
-                        " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   World: Infinite" EOL EOL,
+                        " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   World: Infinite" EOL EOL,
                         sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
-                        sparse_count(app->sparse));
+                        sparse_count(app->sparse), app->infinite_cell_px);
             } else {
                 appendf(buf, cap, n,
                         " State: %s   Gen: %ld   Size: %dx%d   World: %s" EOL EOL,
@@ -415,7 +427,7 @@ static void append_controls(const App *app, const Board *board,
         default:
             if (inf) {
                 appendf(buf, cap, n,
-                        " Drag to pan   Tab/Left/Right select   Space/Enter activate   q quit" CLR_EOL);
+                        " Drag to pan   Wheel to zoom   Tab/Left/Right select   Space/Enter activate   q quit" CLR_EOL);
             } else {
                 appendf(buf, cap, n,
                         " Tab/Left/Right select   Space/Enter activate   q quit" CLR_EOL);
@@ -680,17 +692,16 @@ static void activate_button(App *app) {
 
 /* Convert a delta measured in screen character cells into a delta in world
    cells. The mouse reports character cells, while the sixel renderer draws
-   INFINITE_CELL_PX pixels per world cell, so scale through the pixel size of a
+   infinite_cell_px pixels per world cell, so scale through the pixel size of a
    character cell (character-cell pixels / world-cell pixels). */
 static void screen_delta_to_world(const App *app, int dcol, int drow,
                                    int *wdx, int *wdy) {
-    (void)app;
     int cols, rows, xpx, ypx;
     if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
         int ccw = xpx / cols, cch = ypx / rows;
         if (ccw > 0 && cch > 0) {
-            *wdx = (dcol * ccw) / INFINITE_CELL_PX;
-            *wdy = (drow * cch) / INFINITE_CELL_PX;
+            *wdx = (dcol * ccw) / app->infinite_cell_px;
+            *wdy = (drow * cch) / app->infinite_cell_px;
             return;
         }
     }
@@ -698,11 +709,42 @@ static void screen_delta_to_world(const App *app, int dcol, int drow,
     *wdy = drow;
 }
 
-/* Left-drag panning of the infinite-world viewport. Press captures an anchor;
-   subsequent drag-motion events recompute the camera from it so the grabbed
-   point tracks the cursor; release ends the drag. */
-static void handle_mouse_pan(App *app) {
+/* Mouse-wheel zoom of the infinite viewport, keeping the world point under the
+   cursor fixed so zoom feels centred there. dir = +1 zooms in (larger cells),
+   -1 zooms out. mx,my are the cursor's character-cell position. */
+static void zoom_infinite(App *app, int dir, int mx, int my) {
+    int old_px = app->infinite_cell_px;
+    int new_px = clamp_dim(old_px + dir * ZOOM_STEP,
+                           INFINITE_CELL_MIN, INFINITE_CELL_MAX);
+    if (new_px == old_px) return;
+
+    int cols, rows, xpx, ypx;
+    if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
+        int ccw = xpx / cols, cch = ypx / rows;
+        if (ccw > 0 && cch > 0) {
+            /* World cell currently under the cursor; keep it there afterwards. */
+            int px_x = mx * ccw, px_y = my * cch;
+            int world_x = app->cam_x + px_x / old_px;
+            int world_y = app->cam_y + px_y / old_px;
+            app->infinite_cell_px = new_px;
+            app->cam_x = world_x - px_x / new_px;
+            app->cam_y = world_y - px_y / new_px;
+            return;
+        }
+    }
+    app->infinite_cell_px = new_px; /* no pixel size: zoom without re-anchoring */
+}
+
+/* Handle a mouse event in the infinite world: the wheel zooms (anchored on the
+   cursor), and the left button drags to pan (press captures an anchor;
+   drag-motion recomputes the camera from it so the grabbed point tracks the
+   cursor; release ends the drag). */
+static void handle_mouse(App *app) {
     MouseEvent m = terminal_mouse();
+    if (m.button == 64 || m.button == 65) { /* wheel up / down */
+        if (m.pressed) zoom_infinite(app, m.button == 64 ? +1 : -1, m.x, m.y);
+        return;
+    }
     if (m.button == 0 && m.pressed && !m.motion) {
         app->dragging = true;
         app->drag_mx = m.x;
@@ -721,10 +763,10 @@ static void handle_mouse_pan(App *app) {
 }
 
 static void handle_normal(App *app, Key key) {
-    /* Left-drag pans the infinite-world viewport; the arrow keys always move the
-       button selection (in every world). */
+    /* In the infinite world the mouse pans (left-drag) and zooms (wheel); the
+       arrow keys always move the button selection (in every world). */
     if (key == KEY_MOUSE) {
-        if (app->world == WORLD_INFINITE) handle_mouse_pan(app);
+        if (app->world == WORLD_INFINITE) handle_mouse(app);
         return;
     }
 
@@ -999,6 +1041,15 @@ static void handle_winch(App *app) {
     if (app->pending_h > app->max_h) app->pending_h = app->max_h;
 }
 
+/* Dispatch a key to the handler for the current mode. */
+static void handle_key(App *app, Key key) {
+    switch (app->mode) {
+        case UI_EDIT:   handle_edit(app, key);   break;
+        case UI_CANVAS: handle_canvas(app, key); break;
+        default:        handle_normal(app, key); break;
+    }
+}
+
 int main(int argc, char **argv) {
     /* Start from persisted settings (or built-in defaults on first run), then
        let command-line options override for this run. */
@@ -1077,6 +1128,7 @@ int main(int argc, char **argv) {
     app.max_h = max_h;
     app.view_w = opt.width;
     app.view_h = opt.height;
+    app.infinite_cell_px = INFINITE_CELL_PX;
     app.settings = &settings;
 
     app.sparse = sparse_new();
@@ -1150,10 +1202,19 @@ int main(int argc, char **argv) {
             app.blink_on = (key == KEY_NONE) ? !app.blink_on : true;
         }
 
-        switch (app.mode) {
-            case UI_EDIT:   handle_edit(&app, key);   break;
-            case UI_CANVAS: handle_canvas(&app, key); break;
-            default:        handle_normal(&app, key); break;
+        handle_key(&app, key);
+
+        /* Coalesce a burst of further pending input into a single render. A fast
+           mouse drag emits many motion events; rendering (and, in sixel mode,
+           emitting a full-screen image) once per event backs up under load and
+           floods the terminal with images. Instead, process everything already
+           waiting, then draw once. terminal_read_key(0) polls without blocking
+           and returns KEY_NONE when the buffer is empty. */
+        while (app.running) {
+            Key k = terminal_read_key(0);
+            if (k == KEY_NONE) break;
+            if (app.mode == UI_EDIT) app.blink_on = true;
+            handle_key(&app, k);
         }
 
         if (app.running) {
