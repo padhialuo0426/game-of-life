@@ -4,7 +4,18 @@
 #include <stdbool.h>
 #include <time.h>
 
-/* A transient "toast": a short message that floats over the world for a fixed
+/* The UI has three kinds of "popup" — overlays that float on top of the world —
+   which differ only in *when they close*:
+     - STICKY : never closes on its own. The status HUD; redrawn every frame while
+                in world view.
+     - TIMED  : closes after a fixed delay. This Popup toast (POPUP_TTL_MS).
+     - MODAL  : closes when the user finishes or cancels. The Save/Load/Confirm
+                windows.
+   All three share one rendering primitive (overlay_box in main.c, which draws the
+   bg-filled bordered box over the world). Only the TIMED kind needs the timer
+   bookkeeping below, so that is all this module owns.
+
+   A transient "toast": a short message that floats over the world for a fixed
    time, then auto-hides on its own. Used for Save/Load results, which previously
    lingered forever when the user drove the UI with the mouse only. */
 #define POPUP_TTL_MS 5000

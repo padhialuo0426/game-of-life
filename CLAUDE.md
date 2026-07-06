@@ -78,6 +78,19 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Unify the overlays under one "popup" model + shared `overlay_box`.**
+  Per the STICKY/TIMED/MODAL taxonomy (all three float over the world; they differ
+  only in *when they close*): the status HUD is STICKY (redrawn each frame), the
+  Save/Load toast is TIMED (`popup.{c,h}`, `POPUP_TTL_MS`), and the Save/Load/
+  Confirm windows are MODAL (closed by a mode transition). They now share one
+  rendering primitive, **`overlay_box(buf,cap,n, x0,y0,w,h, corner,horiz,vert)`**
+  (main.c): draws an opaque, bg-filled box floating over the world with the given
+  border chars (`corner==0` ⇒ borderless fill). The toast uses `'*','*','*'` (its
+  asterisk notification box) and `render_dialog`'s frame uses `'+','-','|'`,
+  replacing the hand-rolled `hbar`/`sp` border loop. The close-policy taxonomy is
+  documented at the top of `popup.h`. PTY-verified identical output: Load list
+  ASCII border (rows 7/44 + 36 sides) + entries, toast star box (rows 40/42) +
+  text, Confirm ASCII border + Yes/No.
 - **(Fedora) Floating HUD + auto-hiding Save/Load toast (`popup.{c,h}`).** The
   status line and the Save/Load result message used to sit in a controls block
   *below* the world; the message only cleared on the next keypress, so mouse-only

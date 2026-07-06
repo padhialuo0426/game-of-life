@@ -533,6 +533,32 @@ static void compute_button_geometry(App *app, int img_rows, int cols) {
     }
 }
 
+/* Shared primitive behind every "popup" overlay (see popup.h for the STICKY /
+   TIMED / MODAL taxonomy): draw an opaque, bg-filled box at 1-based (x0,y0) of
+   size w x h floating over the world, bordered with the `corner`/`horiz`/`vert`
+   characters. If `corner` is 0 the box has no border (a plain fill). The caller
+   writes the box's content on top afterwards. */
+static void overlay_box(char *buf, size_t cap, size_t *n,
+                        int x0, int y0, int w, int h,
+                        char corner, char horiz, char vert) {
+    if (w < 1 || h < 1) return;
+    char border[520], fill[520];
+    int iw = w - 2; if (iw < 0) iw = 0; if (iw > 517) iw = 517;
+    if (corner) {
+        border[0] = corner; memset(border + 1, horiz, (size_t)iw);
+        border[1 + iw] = corner; border[2 + iw] = '\0';
+        fill[0] = vert; memset(fill + 1, ' ', (size_t)iw);
+        fill[1 + iw] = vert; fill[2 + iw] = '\0';
+    } else {
+        int fw = w; if (fw > 518) fw = 518;
+        memset(fill, ' ', (size_t)fw); fill[fw] = '\0';
+    }
+    for (int r = 0; r < h; r++) {
+        const char *ln = (corner && (r == 0 || r == h - 1)) ? border : fill;
+        appendf(buf, cap, n, "\033[%d;%dH" HUD_BG "%s" ANSI_RESET, y0 + r, x0, ln);
+    }
+}
+
 /* Emit an already-encoded sixel image plus the controls below it. Re-emits the
    image only when it actually changed since the last frame (see the dedup note),
    so idle frames cost nothing and do not pile images into terminals that retain
@@ -591,22 +617,16 @@ static void emit_frame(App *app, char *img, size_t img_len,
     if (popup_visible(&app->popup)) {
         const int MX = 4, MY = 2;            /* right / bottom margins (cells) */
         int plen = (int)strlen(app->popup.text);
-        int boxw = plen + 4;                 /* "* " + text + " *" */
+        int boxw = plen + 4;                 /* '*' ' ' text ' ' '*' */
         if (boxw > cols) boxw = cols;
         int x0 = cols - boxw + 1 - MX;        /* 1-based left column */
         if (x0 < 1) x0 = 1;
         int ytop = img_rows - 2 - MY;         /* top row; bottom == img_rows - MY */
         if (ytop < 1) ytop = 1;
-        char star[600];
-        int sw = boxw; if (sw > (int)sizeof(star) - 1) sw = (int)sizeof(star) - 1;
-        memset(star, '*', (size_t)sw); star[sw] = '\0';
-        int inner = boxw - 4; if (inner < 0) inner = 0; /* text width inside "* .. *" */
-        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG "%s" ANSI_RESET,
-                ytop, x0, star);
-        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG "* %-*.*s *" ANSI_RESET,
-                ytop + 1, x0, inner, inner, app->popup.text);
-        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG "%s" ANSI_RESET,
-                ytop + 2, x0, star);
+        int inner = boxw - 4; if (inner < 0) inner = 0; /* text width inside the box */
+        overlay_box(ov, sizeof(ov), &on, x0, ytop, boxw, 3, '*', '*', '*');
+        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG "%-*.*s" ANSI_RESET,
+                ytop + 1, x0 + 2, inner, inner, app->popup.text);
     }
     fwrite(ov, 1, on, stdout);
 
@@ -684,20 +704,9 @@ static void render_dialog(App *app) {
     app->dlg_sort_row = app->dlg_typepath_row = app->dlg_list_row0 = -1;
     app->dlg_confirm_row = -1;
 
-    /* 1) Frame: black fill + ASCII border, overlaid on the world. */
-    char hbar[520], sp[520];
-    int inner = w - 2; if (inner < 0) inner = 0; if (inner > 518) inner = 518;
-    memset(hbar, '-', (size_t)inner); hbar[inner] = '\0';
-    memset(sp, ' ', (size_t)inner); sp[inner] = '\0';
-    for (int r = 0; r < h; r++) {
-        if (r == 0 || r == h - 1) {
-            appendf(buf, bcap, &n, "\033[%d;%dH" DLG_BG "+%s+" ANSI_RESET,
-                    y0 + r + 1, x0 + 1, hbar);
-        } else {
-            appendf(buf, bcap, &n, "\033[%d;%dH" DLG_BG "|%s|" ANSI_RESET,
-                    y0 + r + 1, x0 + 1, sp);
-        }
-    }
+    /* 1) Frame: black fill + ASCII border, overlaid on the world (shared with the
+       toast via overlay_box; 1-based coords, so the 0-based x0/y0 get +1). */
+    overlay_box(buf, bcap, &n, x0 + 1, y0 + 1, w, h, '+', '-', '|');
 
     /* 2) Content, written over the black box. */
     char line[1024];
