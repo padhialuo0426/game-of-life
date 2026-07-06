@@ -143,25 +143,54 @@ Konsole/WezTerm/foot are fine. Real fix for the iTerm2 user = update to ≥3.7.0
 
 See also the memory note: `.claude/.../memory/sixel-scrollback-retention.md`.
 
-## Next steps (in priority order)
+## Next steps
 
-1. ~~**Verify on Fedora + Konsole**~~ **DONE (2026-07-06).** Konsole memory stable
-   across active sim + long drags; drag-pan + wheel-zoom smooth; no crash. Our own
-   process RSS flat under a PTY memory check. Confirms the blow-up is iTerm2-specific.
-   (See the CONFIRMED note in "THE OPEN BUG" above.)
-2. **Recommend the user update iTerm2 to ≥ 3.7.0beta1** — the actual fix for the leak.
-3. **If the infinite pan+zoom feels good → remove Toroidal and Finite worlds**
-   (the agreed direction). That deletes: dense-engine stepping for bounded worlds,
-   `WorldType` cycling in canvas, `resize_boards`, dense↔sparse conversions, and a
-   lot of branching. Keep `Board` only as the render snapshot for the viewport.
-4. ~~**Optional perf fix for huge screens / min zoom**~~ **DONE (2026-07-06,
-   Fedora).** Now renders directly from the sparse live-cell set via
-   `sparse_query` + the incremental `SixelCanvas` — no dense viewport snapshot,
-   so the per-frame cost dropped from O(viewport cells) hash lookups to O(live
-   population + pixels). 6.9× faster at 1000×1000 @ 1px, byte-identical output.
-   (See the changes list above.) Remaining cost at min zoom is the sixel encode
-   itself, O(pixels) — inherent to describing every pixel band; only worth
-   attacking further if huge-screen encode ever becomes the bottleneck.
+The infinite world is now highly usable (direct sparse render, mouse pan+zoom,
+verified stable on Konsole). Below is the current prioritised backlog, agreed
+across both machines. Grouped by value/effort. Nothing here is started yet unless
+marked DONE. When you pick one up, update this list.
+
+### Done / standing advice
+- ~~Verify Fedora + Konsole~~ **DONE (2026-07-06)** — see "THE OPEN BUG" note.
+- ~~Direct sparse render (old perf item #4)~~ **DONE (2026-07-06)** — see changes list.
+- **Advice to the iTerm2 user (not code):** update iTerm2 to ≥ 3.7.0beta1 — the
+  actual fix for the image-retention memory blow-up.
+
+### Tier 1 — quick wins, biggest jump in "playability" (do first)
+1. **Recenter / follow the pattern.** The #1 infinite-world pain: a glider drifts
+   off and you lose it. Add a key that jumps the camera to the live cells'
+   **bounding-box centre** (`sparse_bounds` already exists — near-zero cost), plus
+   a toggleable **follow mode** that recentres every generation so you can watch a
+   spaceship travel. High value, small code. **Best value/effort — recommended first.**
+2. **Runtime speed control.** `delay_ms` is currently fixed at launch (`-d` only).
+   Add `+`/`-` (or `[`/`]`) to change it live, with the current speed on the status
+   line. Small code; essential for actually watching evolution.
+
+### Tier 2 — structural, the agreed direction
+3. **Collapse to a pure infinite sandbox: remove Toroidal + Finite worlds.**
+   Precondition ("infinite feels good") is now met. Deletes: dense-engine stepping
+   for bounded worlds, `WorldType` cycling, `resize_boards`, dense↔sparse
+   conversions, and a lot of branching. Note **Canvas mode becomes vestigial**
+   (an infinite world has no "board size" — canvas already shows Width/Height as
+   `--`), so simplify or remove Canvas too. Keep `Board` only as a render helper
+   if still needed. Medium effort; it's subtraction, not new capability — hence
+   ranked after the two Tier-1 wins, but it is the standing product direction.
+
+### Tier 3 — nice to have
+4. **Large-pattern save/load (RLE).** Real sandbox persistence: load the community
+   -standard `.rle` format (guns, spaceships — `.cells` is inefficient for big
+   patterns) and save the current world back out. High value, **largest effort**
+   (new parser + writer).
+5. **Clear-to-empty action.** One key to blank the world and draw from scratch
+   (`sparse_clear` already exists). Tiny.
+6. **Keyboard zoom (`+`/`-`).** Zoom without a mouse. Tiny. (Mind the collision if
+   `+`/`-` is taken by speed control in item 2 — pick distinct keys.)
+
+### Tier 4 — perf, only if it actually bites
+7. **Encode sixel directly from the live-cell set.** Removes the residual O(pixels)
+   encode cost at huge screen / 1px zoom (~1.7 ms/frame today). Only worth doing if
+   big-screen encode ever becomes the bottleneck; the direct-render change already
+   killed the O(viewport) hash-lookup cost that was the real problem.
 
 ## Gotchas / constraints for future work
 
