@@ -355,7 +355,7 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
                 " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
     } else {
         appendf(buf, cap, n,
-                " Drag pan   Wheel zoom   c center   f follow   j jump   Tab select   Space/Enter activate   q quit" CLR_EOL);
+                " Drag pan   Wheel zoom   c center   f follow   j jump   x clear   Tab select   Space/Enter activate   q quit" CLR_EOL);
     }
 }
 
@@ -494,6 +494,18 @@ static void recenter_camera(App *app) {
     const int mid_y = miny + (maxy - miny) / 2;
     app->cam_x = mid_x - app->view_w / 2;
     app->cam_y = mid_y - app->view_h / 2;
+}
+
+/* Empty the world to a blank slate: clears the live cells, makes empty the new
+   restart config (so Reset stays blank), resets the generation and history.
+   Deliberate — there is no pattern to recover afterwards except by reloading. */
+static void clear_world(App *app) {
+    engine_clear(app->engine);
+    engine_snapshot_free(app->restart);
+    app->restart = engine_snapshot(app->engine); /* empty */
+    history_clear(app->history);
+    app->gen = 0;
+    app->sim = SIM_STOPPED;
 }
 
 /* Enter the jump prompt (type a target generation). */
@@ -705,6 +717,8 @@ static void handle_normal(App *app, Key key) {
                     if (app->follow) recenter_camera(app);
                 } else if (c == 'j' || c == 'J') {
                     enter_jump(app);
+                } else if (c == 'x' || c == 'X') {
+                    clear_world(app);
                 }
             }
             break;
