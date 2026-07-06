@@ -4,6 +4,7 @@
 #include "config.h"
 #include "engine.h"
 #include "history.h"
+#include "popup.h"
 #include "rle.h"
 #include "settings.h"
 #include "sixel.h"
@@ -31,6 +32,11 @@
 #define ANSI_REVERSE     "\033[7m"
 #define ANSI_RESET       "\033[0m"
 #define ANSI_CLR_BELOW   "\033[J"  /* erase from cursor to end of screen */
+
+/* Background for text overlays that float on top of the world image (the top
+   status HUD and the bottom-right popup toast): opaque black cell with bright
+   text so it stays readable over any pixels underneath. */
+#define HUD_BG           "\033[40;37m"
 
 /* End-of-line: erase to the end of the line, then break. Ensures a shorter new
    line fully overwrites a longer previous one (no leftover characters). */
@@ -168,7 +174,14 @@ typedef struct {
        "type a path" input. */
     char file_buf[FILE_BUF_MAX + 1];
     int file_len;
-    char msg[320];              /* transient result of the last save/load */
+    char msg[320];              /* inline error shown inside the Save dialog */
+
+    /* World-view toast: Save/Load results float at the bottom-right of the world
+       and auto-hide after POPUP_TTL_MS (see popup.c). hud_w is the widest the top
+       status bar has ever been (grow-only) so a shorter status never leaves a
+       stale tail over the world when the image is not repainted. */
+    Popup popup;
+    int hud_w;
 
     /* Load browser (UI_LOAD_LIST). */
     SaveEntry *saves;           /* scanned *.rle in the saves dir */
@@ -184,11 +197,14 @@ typedef struct {
     int dlg_typepath_row;
     int dlg_list_row0;          /* screen row of the first visible entry */
 
-    /* Confirm (UI_CONFIRM): a y/n over a pending action. */
+    /* Confirm (UI_CONFIRM): a Yes/No over a pending action. */
     ConfirmAction confirm_action;
     char confirm_path[1300];    /* the file the action targets */
     char confirm_msg[320];      /* the question shown */
     UiMode confirm_return;      /* mode to return to on cancel/after */
+    int confirm_sel;            /* highlighted button: 0 = Yes, 1 = No */
+    /* Yes/No hit boxes (0-based), recomputed each confirm frame for the mouse. */
+    int dlg_confirm_row, dlg_yes_c0, dlg_yes_c1, dlg_no_c0, dlg_no_c1;
 
     /* Left-drag panning. While the left button is held, the camera is recomputed
        from the anchor captured on press so the grabbed point stays under the
@@ -410,28 +426,37 @@ static void plot_cell_cb(int x, int y, void *ud) {
 
 /* Append the controls block below the sixel image: status line, a blank line,
    the button bar, a blank line, and the hint line. */
-static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
+/* Build the mode-appropriate status line (plain text, no embedded SGR so its
+   printed width equals strlen — the top HUD pads by that). This is the bar that
+   now floats over the top of the world instead of sitting below it. */
+static void build_status(const App *app, char *buf, size_t cap) {
     if (app->jumping) {
-        appendf(buf, cap, n,
-                " JUMPING   Gen: %ld / %ld   Live: %zu   (Esc to stop)" EOL EOL,
-                app->gen, app->jump_target, engine_population(app->engine));
+        snprintf(buf, cap, "JUMPING   Gen: %ld / %ld   Live: %zu   (Esc to stop)",
+                 app->gen, app->jump_target, engine_population(app->engine));
     } else if (app->mode == UI_JUMP) {
-        appendf(buf, cap, n, " JUMP   Go to generation: " ANSI_REVERSE "%ld" ANSI_RESET
-                "   (now: %ld)" EOL EOL, app->jump_field, app->gen);
+        snprintf(buf, cap, "JUMP   Go to generation: %ld   (now: %ld)",
+                 app->jump_field, app->gen);
     } else if (app->mode == UI_EDIT) {
-        appendf(buf, cap, n,
-                " EDIT   Cursor: (%d,%d)   Live: %zu" EOL EOL,
-                app->cursor_x, app->cursor_y, engine_population(app->engine));
+        snprintf(buf, cap, "EDIT   Cursor: (%d,%d)   Live: %zu",
+                 app->cursor_x, app->cursor_y, engine_population(app->engine));
     } else {
         char zbuf[16];
         zoom_label(app, zbuf, sizeof(zbuf));
-        appendf(buf, cap, n,
-                " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %s   Delay: %ldms   Follow: %s" EOL,
-                sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
-                engine_population(app->engine), zbuf,
-                app->delay_ms, app->follow ? "on" : "off");
-        appendf(buf, cap, n, "%s" EOL, app->msg[0] ? app->msg : "");
+        snprintf(buf, cap,
+                 "State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   "
+                 "Zoom: %s   Delay: %ldms   Follow: %s",
+                 sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
+                 engine_population(app->engine), zbuf,
+                 app->delay_ms, app->follow ? "on" : "off");
     }
+}
+
+/* The controls that sit *below* the world image: a button bar and a hint line.
+   The status line moved to a HUD floating over the top of the world (see
+   build_status / emit_frame), so only these two remain here. */
+static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
+    /* Blank spacer between the world image and the button bar. */
+    appendf(buf, cap, n, EOL);
 
     /* Button bar; selection is highlighted only in normal mode. */
     appendf(buf, cap, n, " ");
@@ -443,7 +468,7 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
         }
         appendf(buf, cap, n, " ");
     }
-    appendf(buf, cap, n, EOL EOL);
+    appendf(buf, cap, n, EOL);
 
     /* The hint is the last line of the frame, so it ends with CLR_EOL (no
        newline) to avoid scrolling the screen on the bottom row. */
@@ -475,13 +500,13 @@ static uint64_t fnv1a(const char *data, size_t len) {
 }
 
 /* Record where the button bar and each button land on screen (0-based, matching
-   the decoded SGR mouse position) so handle_mouse can hit-test clicks. The bar is
-   always the 3rd controls line — the mode's status block is two lines (see
-   append_controls) — so its row is img_rows + 2. Columns mirror exactly what the
-   bar loop emits: a leading space, then "[label]" (strlen+2 wide) and a trailing
-   space per button. */
+   the decoded SGR mouse position) so handle_mouse can hit-test clicks. The status
+   line now floats over the top of the world, so below the image there is only a
+   blank spacer then the bar — its row is img_rows + 1. Columns mirror exactly what
+   the bar loop emits: a leading space, then "[label]" (strlen+2 wide) and a
+   trailing space per button. */
 static void compute_button_geometry(App *app, int img_rows) {
-    app->bar_row = img_rows + 2;
+    app->bar_row = img_rows + 1;
     int col = 1; /* first button's '[' sits just after the single leading space */
     for (int b = 0; b < BTN_COUNT; b++) {
         int w = (int)strlen(BUTTON_LABELS[b]) + 2; /* the bracketed "[label]" */
@@ -517,6 +542,37 @@ static void emit_frame(App *app, char *img, size_t img_len,
         app->sx_drawn = true;
     }
     free(img);
+
+    int cols = 0, rows = 0;
+    if (!terminal_size(&cols, &rows)) { cols = 80; rows = 24; }
+
+    /* Overlays floating on top of the world image, redrawn every frame so they
+       stay current and survive an image repaint (which paints over them):
+         - a status HUD pinned to the world's top-left row, and
+         - a transient popup toast at the world's bottom-right.
+       Both use an opaque cell background so they read over any pixels beneath. */
+    char ov[1024];
+    size_t on = 0;
+
+    int maxw = cols - 2; if (maxw < 1) maxw = 1; /* room for the two pad spaces */
+    char status[256];
+    build_status(app, status, sizeof(status));
+    int svis = (int)strlen(status);
+    if (svis > maxw) svis = maxw;
+    if (svis > app->hud_w) app->hud_w = svis; /* grow-only, no shrink artifacts */
+    if (app->hud_w > maxw) app->hud_w = maxw;
+    appendf(ov, sizeof(ov), &on, "\033[1;1H" HUD_BG " %.*s", svis, status);
+    for (int i = svis; i < app->hud_w; i++) appendf(ov, sizeof(ov), &on, " ");
+    appendf(ov, sizeof(ov), &on, " " ANSI_RESET);
+
+    if (popup_visible(&app->popup)) {
+        int plen = (int)strlen(app->popup.text);
+        int startc = cols - (plen + 2); /* 1-based; +2 for the surrounding spaces */
+        if (startc < 1) startc = 1;
+        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG " %s " ANSI_RESET,
+                img_rows, startc, app->popup.text);
+    }
+    fwrite(ov, 1, on, stdout);
 
     /* Controls, positioned just below the image. We run on the alternate screen
        buffer (no scrollback), so scrolled sixel images are discarded rather than
@@ -591,6 +647,7 @@ static void render_dialog(App *app) {
     size_t n = 0;
     app->bar_row = -1;
     app->dlg_sort_row = app->dlg_typepath_row = app->dlg_list_row0 = -1;
+    app->dlg_confirm_row = -1;
 
     /* 1) Frame: black fill + ASCII border, overlaid on the world. */
     char hbar[520], sp[520];
@@ -626,7 +683,22 @@ static void render_dialog(App *app) {
         int midr = chh / 2 - 1; if (midr < 1) midr = 1;
         snprintf(line, sizeof(line), "%.*s", cw, app->confirm_msg);
         dlg_row(buf, bcap, &n, cy, cx, midr, line);
-        dlg_row(buf, bcap, &n, cy, cx, midr + 2, "y = yes        n / Esc = no");
+
+        /* Two selectable, clickable buttons: [ Yes ]  [ No ]. The highlighted
+           one (confirm_sel) is drawn in reverse video like the main menu bar. */
+        const char *yes = "[ Yes ]", *no = "[ No ]";
+        int gap = 4;
+        int yw = (int)strlen(yes), nw = (int)strlen(no);
+        app->dlg_confirm_row = cy + midr + 2;
+        app->dlg_yes_c0 = cx;            app->dlg_yes_c1 = cx + yw;
+        app->dlg_no_c0  = cx + yw + gap; app->dlg_no_c1  = cx + yw + gap + nw;
+        snprintf(line, sizeof(line),
+                 "%s%s" ANSI_RESET DLG_BG "    %s%s" ANSI_RESET DLG_BG,
+                 app->confirm_sel == 0 ? ANSI_REVERSE : "", yes,
+                 app->confirm_sel == 1 ? ANSI_REVERSE : "", no);
+        dlg_row(buf, bcap, &n, cy, cx, midr + 2, line);
+        dlg_row(buf, bcap, &n, cy, cx, midr + 4,
+                "Tab/Arrows move   Enter select   y/n shortcut   Esc = no");
     } else { /* UI_LOAD_LIST */
         dlg_row(buf, bcap, &n, cy, cx, 0, "Load pattern");
         snprintf(line, sizeof(line), "Folder: %.*s", cw - 8, dir);
@@ -917,7 +989,7 @@ static void write_current_to(App *app, const char *path) {
     engine_query(app->engine, INT_MIN, INT_MIN, INT_MAX, INT_MAX, gather_cb, &v);
     if (v.oom) {
         free(v.xy);
-        snprintf(app->msg, sizeof(app->msg), "Save failed: out of memory");
+        popup_show(&app->popup, "Save failed: out of memory");
         return;
     }
     char err[128] = {0};
@@ -927,9 +999,9 @@ static void write_current_to(App *app, const char *path) {
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
     if (ok) {
-        snprintf(app->msg, sizeof(app->msg), "Saved %zu cells to %s", nn, base);
+        popup_show(&app->popup, "Saved %zu cells to %s", nn, base);
     } else {
-        snprintf(app->msg, sizeof(app->msg), "Save failed: %s", err);
+        popup_show(&app->popup, "Save failed: %s", err);
     }
 }
 
@@ -1046,6 +1118,7 @@ static void enter_confirm(App *app, ConfirmAction action, const char *path,
     snprintf(app->confirm_path, sizeof(app->confirm_path), "%s", path ? path : "");
     snprintf(app->confirm_msg, sizeof(app->confirm_msg), "%s", msg);
     app->confirm_return = return_to;
+    app->confirm_sel = 1; /* default to No — these guard destructive actions */
     app->mode = UI_CONFIRM;
 }
 
@@ -1067,9 +1140,9 @@ static void resolve_confirm(App *app, bool yes) {
             break;
         case CONFIRM_DELETE:
             if (remove(app->confirm_path) == 0) {
-                snprintf(app->msg, sizeof(app->msg), "Deleted");
+                popup_show(&app->popup, "Deleted");
             } else {
-                snprintf(app->msg, sizeof(app->msg), "Delete failed");
+                popup_show(&app->popup, "Delete failed");
             }
             app->mode = UI_LOAD_LIST;
             scan_saves(app);
@@ -1085,12 +1158,12 @@ static bool do_load_path(App *app, const char *path) {
     size_t count = 0;
     char err[128] = {0};
     if (!load_rle_file(app, path, &count, err, sizeof(err))) {
-        snprintf(app->msg, sizeof(app->msg), "Load failed: %s", err);
+        popup_show(&app->popup, "Load failed: %s", err);
         return false;
     }
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    snprintf(app->msg, sizeof(app->msg), "Loaded %zu cells from %s", count, base);
+    popup_show(&app->popup, "Loaded %zu cells from %s", count, base);
     app->mode = UI_NORMAL;
     return true;
 }
@@ -1401,11 +1474,11 @@ static void handle_mouse(App *app) {
         return;
     }
     if (m.button == 0 && m.pressed && !m.motion) {
-        /* Clicks anywhere in the controls area (status lines + button bar) never
-           pan the world. A click on the bar row selects and activates its button;
-           the two status lines just above it are swallowed. Everything above the
-           controls is the image, where a press begins a pan. */
-        if (app->mode == UI_NORMAL && app->bar_row >= 0 && m.y >= app->bar_row - 2) {
+        /* Clicks anywhere in the controls area (below the image) never pan the
+           world. A click on the bar row selects and activates its button; the
+           blank spacer just above it is swallowed too. Everything from the image
+           upward is the world, where a press begins a pan. */
+        if (app->mode == UI_NORMAL && app->bar_row >= 0 && m.y >= app->bar_row - 1) {
             if (m.y == app->bar_row) {
                 for (int b = 0; b < BTN_COUNT; b++) {
                     if (m.x >= app->btn_col0[b] && m.x < app->btn_col1[b]) {
@@ -1440,9 +1513,6 @@ static void handle_normal(App *app, Key key) {
         handle_mouse(app);
         return;
     }
-
-    /* Any real keypress dismisses a lingering save/load message. */
-    if (key != KEY_NONE) app->msg[0] = '\0';
 
     switch (key) {
         case KEY_NONE:
@@ -1700,19 +1770,45 @@ static void handle_load_list(App *app, Key key) {
     }
 }
 
-/* UI_CONFIRM: y = yes; n / Esc = no; Ctrl-C still quits. */
-static void handle_confirm(App *app, Key key) {
-    if (key == KEY_ESC) { resolve_confirm(app, false); return; }
-    if (key == KEY_QUIT) {
-        int c = terminal_char();
-        if (c == 0x03) app->running = false; /* Ctrl-C */
-        else resolve_confirm(app, false);    /* 'q' = no */
-        return;
+/* Hit-test a left click on the confirm dialog's Yes/No buttons. */
+static void handle_confirm_mouse(App *app) {
+    MouseEvent m = terminal_mouse();
+    if (!(m.button == 0 && m.pressed && !m.motion)) return;
+    if (m.y != app->dlg_confirm_row) return;
+    if (m.x >= app->dlg_yes_c0 && m.x < app->dlg_yes_c1) {
+        app->confirm_sel = 0;
+        resolve_confirm(app, true);
+    } else if (m.x >= app->dlg_no_c0 && m.x < app->dlg_no_c1) {
+        app->confirm_sel = 1;
+        resolve_confirm(app, false);
     }
-    if (key == KEY_OTHER) {
-        int c = terminal_char();
-        if (c == 'y' || c == 'Y') resolve_confirm(app, true);
-        else if (c == 'n' || c == 'N') resolve_confirm(app, false);
+}
+
+/* UI_CONFIRM: Tab/Arrows move between [Yes] and [No]; Enter/Space activate the
+   highlighted one; y/n are shortcuts; Esc = no; a click hits either button;
+   Ctrl-C still quits. */
+static void handle_confirm(App *app, Key key) {
+    switch (key) {
+        case KEY_ESC:   resolve_confirm(app, false); return;
+        case KEY_MOUSE: handle_confirm_mouse(app); return;
+        case KEY_LEFT:  app->confirm_sel = 0; return;
+        case KEY_RIGHT: app->confirm_sel = 1; return;
+        case KEY_TAB:   app->confirm_sel ^= 1; return;
+        case KEY_ENTER:
+        case KEY_SPACE: resolve_confirm(app, app->confirm_sel == 0); return;
+        case KEY_QUIT: {
+            int c = terminal_char();
+            if (c == 0x03) app->running = false; /* Ctrl-C */
+            else resolve_confirm(app, false);    /* 'q' = no */
+            return;
+        }
+        case KEY_OTHER: {
+            int c = terminal_char();
+            if (c == 'y' || c == 'Y') resolve_confirm(app, true);
+            else if (c == 'n' || c == 'N') resolve_confirm(app, false);
+            return;
+        }
+        default: return;
     }
 }
 
@@ -1925,6 +2021,11 @@ int main(int argc, char **argv) {
         } else {
             timeout = -1;
         }
+        /* An idle frame with a live popup must still wake in time to auto-hide it. */
+        if (timeout < 0 && app.popup.active) {
+            long rem = popup_remaining_ms(&app.popup);
+            timeout = rem > 0 ? (int)rem : 1;
+        }
         Key key = terminal_read_key(timeout);
 
         /* A window resize (SIGWINCH interrupts the poll above) is handled simply
@@ -1953,6 +2054,12 @@ int main(int argc, char **argv) {
             if (k == KEY_NONE) break;
             if (app.mode == UI_EDIT) app.blink_on = true;
             handle_key(&app, k);
+        }
+
+        /* Auto-hide an expired popup and repaint the world where it floated. */
+        if (popup_expire(&app.popup)) {
+            app.sx_drawn = false;
+            app.sx_last_w = app.sx_last_h = -1;
         }
 
         if (app.running) {

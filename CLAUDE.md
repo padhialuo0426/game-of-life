@@ -45,6 +45,11 @@ so the installed `~/.local/bin` binary stays current for the user to test.
   tagged by generation, for instant rewind. Direct-mapped (`gen % cap`), with
   branch-detection: recording a non-contiguous gen clears the ring (timeline
   changed). `history_floor(gen)` finds the nearest replay base.
+- `src/popup.{c,h}` — a transient "toast": a `Popup` (text + monotonic stamp +
+  active flag) that floats over the world for `POPUP_TTL_MS` (5s) then auto-hides.
+  `popup_show`/`popup_visible`/`popup_expire`/`popup_remaining_ms`/`popup_clear`.
+  Used for Save/Load results (main.c draws it bottom-right over the world image;
+  the main loop wakes on `popup_remaining_ms` to hide an idle one).
 - `src/rle.{c,h}` — read/write the community-standard RLE pattern format
   (`rle_load` → malloc'd (x,y) array; `rle_save` from an (x,y) array). Used by the
   `s`/`l` file prompt. Engine-independent.
@@ -73,6 +78,40 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Floating HUD + auto-hiding Save/Load toast (`popup.{c,h}`).** The
+  status line and the Save/Load result message used to sit in a controls block
+  *below* the world; the message only cleared on the next keypress, so mouse-only
+  use left it forever. Now both float **over** the world image (drawn on an opaque
+  black cell bg so they read over the pixels):
+  - **Status HUD** pinned to the world's **top-left** row, redrawn every frame
+    (`build_status` → plain text; `emit_frame` overlays it at `\033[1;1H`). Width
+    is grow-only (`App.hud_w`) so a shorter status never leaves a stale tail when
+    the image is not repainted.
+  - **Save/Load toast** floats at the world's **bottom-right** (`img_rows`, right-
+    aligned) and **auto-hides after `POPUP_TTL_MS` (5s)** regardless of input. It
+    is a new `Popup` type in `popup.{c,h}` (transient toast: text + monotonic
+    stamp; `popup_show/visible/expire/remaining_ms/clear`). `write_current_to`,
+    `do_load_path`, and the delete path call `popup_show` instead of `app->msg`
+    (which now only carries the *inline* Save-dialog error). The main loop wakes on
+    `popup_remaining_ms` when otherwise idle, and on expiry forces a world repaint
+    (`sx_drawn=false`) to erase where the toast floated.
+  - Below the image there is now just a blank spacer + button bar + hint, so the
+    bar moved up one row: `compute_button_geometry` uses `img_rows + 1` and the
+    click-swallow area is `>= bar_row - 1`.
+  PTY-verified: HUD at row 1 tracks STOPPED→RUNNING and Gen; toast lands bottom-
+  right, survives a keypress, and auto-hides after 5s with exactly one erase
+  repaint; buttons still clickable at the new row.
+- **(Fedora) Confirm dialog Yes/No are now selectable, clickable buttons.** The
+  `UI_CONFIRM` modal used to show a bare `y = yes   n / Esc = no` hint. It now
+  renders two `[ Yes ]` / `[ No ]` buttons (reverse-video highlight on the
+  selected one, like the main menu bar), driven by `App.confirm_sel` (0=Yes,
+  1=No; **defaults to No** since every confirm guards a destructive/overwriting
+  action). Tab toggles, Left→Yes / Right→No, Enter/Space activates the highlight,
+  `y`/`n` remain shortcuts, Esc = No. `render_dialog` records the two hit boxes
+  (`dlg_confirm_row`, `dlg_yes_c0/c1`, `dlg_no_c0/c1`); `handle_confirm_mouse`
+  hit-tests a left click. PTY-verified: highlight toggles via Tab/arrows, Enter on
+  Yes overwrites (mtime changes) + dialog closes, click-No cancels back to the
+  Save-name dialog, click-Yes overwrites.
 - **(Fedora) Clickable buttons + a real Save/Load browser; saves split from
   config.** Usability pass:
   - **Buttons are mouse-clickable.** `emit_frame` records the bar row and each
