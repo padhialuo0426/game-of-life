@@ -98,9 +98,19 @@ so the installed `~/.local/bin` binary stays current for the user to test.
   - Below the image there is now just a blank spacer + button bar + hint, so the
     bar moved up one row: `compute_button_geometry` uses `img_rows + 1` and the
     click-swallow area is `>= bar_row - 1`.
-  PTY-verified: HUD at row 1 tracks STOPPED→RUNNING and Gen; toast lands bottom-
-  right, survives a keypress, and auto-hides after 5s with exactly one erase
-  repaint; buttons still clickable at the new row.
+  Follow-up polish (same session): the **HUD is centred** on the top row (start
+  col from `(cols - barw)/2`); the **toast is an asterisk-bordered box** at the
+  bottom-right (three rows: `*`-border / `* text *` / `*`-border, bottom edge on
+  the image's last row) for a "notification" highlight; and the **button bar and
+  hint are both centred**, drawn at absolute rows `img_rows+2` and `img_rows+4`
+  with a blank row between them (`append_controls` now takes `img_rows, cols`,
+  wipes the controls area with `ANSI_CLR_BELOW`, then places the two centred rows;
+  `button_bar_width()` is shared by the renderer and `compute_button_geometry` so
+  clicks still land).
+  PTY-verified: HUD centred at row 1 tracks STOPPED→RUNNING and Gen; toast box
+  lands bottom-right, survives a keypress, auto-hides after 5s with one erase
+  repaint; centred bar + hint (blank row between) with buttons still clickable
+  (Start→RUNNING, Pause→PAUSED).
 - **(Fedora) Confirm dialog Yes/No are now selectable, clickable buttons.** The
   `UI_CONFIRM` modal used to show a bare `y = yes   n / Esc = no` hint. It now
   renders two `[ Yes ]` / `[ No ]` buttons (reverse-video highlight on the

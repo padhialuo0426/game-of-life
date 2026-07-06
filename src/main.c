@@ -451,41 +451,58 @@ static void build_status(const App *app, char *buf, size_t cap) {
     }
 }
 
-/* The controls that sit *below* the world image: a button bar and a hint line.
-   The status line moved to a HUD floating over the top of the world (see
-   build_status / emit_frame), so only these two remain here. */
-static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
-    /* Blank spacer between the world image and the button bar. */
-    appendf(buf, cap, n, EOL);
-
-    /* Button bar; selection is highlighted only in normal mode. */
-    appendf(buf, cap, n, " ");
+/* Total printed width of the button bar: each "[label]" is strlen+2 wide, joined
+   by single spaces. Shared by the renderer and the mouse hit-test so they agree
+   on where the (centred) bar lands. */
+static int button_bar_width(void) {
+    int w = 0;
     for (int b = 0; b < BTN_COUNT; b++) {
+        w += (int)strlen(BUTTON_LABELS[b]) + 2;
+        if (b) w += 1; /* separator space */
+    }
+    return w;
+}
+
+/* The controls that sit *below* the world image: a centred button bar and, one
+   blank row lower, a centred hint line. The status line moved to a HUD floating
+   over the top of the world (see build_status / emit_frame). Drawn at absolute
+   positions (cursor is at the row just below the image on entry): wipe the whole
+   controls area first, then place the two centred rows. */
+static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
+                            int img_rows, int cols) {
+    appendf(buf, cap, n, ANSI_CLR_BELOW);
+
+    /* Button bar, centred on the row one blank line below the image. */
+    int bleft = (cols - button_bar_width()) / 2; if (bleft < 0) bleft = 0;
+    appendf(buf, cap, n, "\033[%d;%dH", img_rows + 2, bleft + 1);
+    for (int b = 0; b < BTN_COUNT; b++) {
+        if (b) appendf(buf, cap, n, " ");
         if (app->mode == UI_NORMAL && b == app->selected) {
             appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, BUTTON_LABELS[b]);
         } else {
             appendf(buf, cap, n, "[%s]", BUTTON_LABELS[b]);
         }
-        appendf(buf, cap, n, " ");
     }
-    appendf(buf, cap, n, EOL);
 
-    /* The hint is the last line of the frame, so it ends with CLR_EOL (no
-       newline) to avoid scrolling the screen on the bottom row. */
+    /* Hint, centred one blank row below the bar (no trailing newline, so writing
+       it never scrolls the screen). */
+    char hint[256];
     if (app->jumping) {
-        appendf(buf, cap, n, " Jumping to generation %ld…   Esc to stop" CLR_EOL,
-                app->jump_target);
+        snprintf(hint, sizeof(hint), "Jumping to generation %ld...   Esc to stop",
+                 app->jump_target);
     } else if (app->mode == UI_JUMP) {
-        appendf(buf, cap, n,
-                " Type a generation (forward or back)   Backspace delete   "
-                "Enter jump   Esc cancel" CLR_EOL);
+        snprintf(hint, sizeof(hint), "Type a generation (forward or back)   "
+                 "Backspace delete   Enter jump   Esc cancel");
     } else if (app->mode == UI_EDIT) {
-        appendf(buf, cap, n,
-                " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
+        snprintf(hint, sizeof(hint), "Arrows move cursor   Space/Enter toggle   "
+                 "Tab/Esc leave   q quit");
     } else {
-        appendf(buf, cap, n,
-                " Drag pan  Wheel zoom  +/- speed  c center  f follow  j jump  x clear  s/l save/load  Tab select  Space/Enter go  q quit" CLR_EOL);
+        snprintf(hint, sizeof(hint), "Drag pan  Wheel zoom  +/- speed  c center  "
+                 "f follow  j jump  x clear  s/l save/load  Tab select  "
+                 "Space/Enter go  q quit");
     }
+    int hleft = (cols - (int)strlen(hint)) / 2; if (hleft < 0) hleft = 0;
+    appendf(buf, cap, n, "\033[%d;%dH%s", img_rows + 4, hleft + 1, hint);
 }
 
 /* FNV-1a hash of a byte buffer, used to detect whether the rendered image is
@@ -499,20 +516,20 @@ static uint64_t fnv1a(const char *data, size_t len) {
     return h;
 }
 
-/* Record where the button bar and each button land on screen (0-based, matching
-   the decoded SGR mouse position) so handle_mouse can hit-test clicks. The status
-   line now floats over the top of the world, so below the image there is only a
-   blank spacer then the bar — its row is img_rows + 1. Columns mirror exactly what
-   the bar loop emits: a leading space, then "[label]" (strlen+2 wide) and a
-   trailing space per button. */
-static void compute_button_geometry(App *app, int img_rows) {
+/* Record where the (centred) button bar and each button land on screen (0-based,
+   matching the decoded SGR mouse position) so handle_mouse can hit-test clicks.
+   The bar sits one blank row below the image (screen row img_rows+2 → 0-based
+   bar_row img_rows+1) and is centred, so the columns mirror exactly what
+   append_controls emits: bleft, then "[label]" (strlen+2 wide) joined by single
+   spaces. */
+static void compute_button_geometry(App *app, int img_rows, int cols) {
     app->bar_row = img_rows + 1;
-    int col = 1; /* first button's '[' sits just after the single leading space */
+    int col = (cols - button_bar_width()) / 2; if (col < 0) col = 0;
     for (int b = 0; b < BTN_COUNT; b++) {
         int w = (int)strlen(BUTTON_LABELS[b]) + 2; /* the bracketed "[label]" */
         app->btn_col0[b] = col;
         app->btn_col1[b] = col + w;
-        col += w + 1; /* + trailing space */
+        col += w + 1; /* + separator space */
     }
 }
 
@@ -523,7 +540,9 @@ static void compute_button_geometry(App *app, int img_rows) {
 static void emit_frame(App *app, char *img, size_t img_len,
                        int img_w, int img_h, int cch) {
     const int img_rows = (img_h + cch - 1) / cch; /* char rows the image spans */
-    compute_button_geometry(app, img_rows);
+    int cols = 0, rows = 0;
+    if (!terminal_size(&cols, &rows)) { cols = 80; rows = 24; }
+    compute_button_geometry(app, img_rows, cols);
 
     const uint64_t hash = fnv1a(img, img_len);
     const bool image_changed = !app->sx_drawn || hash != app->sx_last_hash ||
@@ -543,15 +562,12 @@ static void emit_frame(App *app, char *img, size_t img_len,
     }
     free(img);
 
-    int cols = 0, rows = 0;
-    if (!terminal_size(&cols, &rows)) { cols = 80; rows = 24; }
-
     /* Overlays floating on top of the world image, redrawn every frame so they
        stay current and survive an image repaint (which paints over them):
-         - a status HUD pinned to the world's top-left row, and
-         - a transient popup toast at the world's bottom-right.
+         - a status HUD centred on the world's top row, and
+         - a transient popup toast in an asterisk-bordered box at the bottom-right.
        Both use an opaque cell background so they read over any pixels beneath. */
-    char ov[1024];
+    char ov[2048];
     size_t on = 0;
 
     int maxw = cols - 2; if (maxw < 1) maxw = 1; /* room for the two pad spaces */
@@ -561,27 +577,46 @@ static void emit_frame(App *app, char *img, size_t img_len,
     if (svis > maxw) svis = maxw;
     if (svis > app->hud_w) app->hud_w = svis; /* grow-only, no shrink artifacts */
     if (app->hud_w > maxw) app->hud_w = maxw;
-    appendf(ov, sizeof(ov), &on, "\033[1;1H" HUD_BG " %.*s", svis, status);
+    /* Centre the bar on the top row: 1 lead + hud_w content + 1 trail space. */
+    int barw = app->hud_w + 2;
+    int hstart = (cols - barw) / 2 + 1; if (hstart < 1) hstart = 1; /* 1-based */
+    appendf(ov, sizeof(ov), &on, "\033[1;%dH" HUD_BG " %.*s", hstart, svis, status);
     for (int i = svis; i < app->hud_w; i++) appendf(ov, sizeof(ov), &on, " ");
     appendf(ov, sizeof(ov), &on, " " ANSI_RESET);
 
+    /* Toast: an asterisk-bordered box floating near the world's bottom-right, for
+       a "notification" highlight. Three rows (top border, text, bottom border),
+       inset up-and-left from the very corner by a small margin so it reads as a
+       floating card rather than being jammed into the edge. */
     if (popup_visible(&app->popup)) {
+        const int MX = 4, MY = 2;            /* right / bottom margins (cells) */
         int plen = (int)strlen(app->popup.text);
-        int startc = cols - (plen + 2); /* 1-based; +2 for the surrounding spaces */
-        if (startc < 1) startc = 1;
-        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG " %s " ANSI_RESET,
-                img_rows, startc, app->popup.text);
+        int boxw = plen + 4;                 /* "* " + text + " *" */
+        if (boxw > cols) boxw = cols;
+        int x0 = cols - boxw + 1 - MX;        /* 1-based left column */
+        if (x0 < 1) x0 = 1;
+        int ytop = img_rows - 2 - MY;         /* top row; bottom == img_rows - MY */
+        if (ytop < 1) ytop = 1;
+        char star[600];
+        int sw = boxw; if (sw > (int)sizeof(star) - 1) sw = (int)sizeof(star) - 1;
+        memset(star, '*', (size_t)sw); star[sw] = '\0';
+        int inner = boxw - 4; if (inner < 0) inner = 0; /* text width inside "* .. *" */
+        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG "%s" ANSI_RESET,
+                ytop, x0, star);
+        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG "* %-*.*s *" ANSI_RESET,
+                ytop + 1, x0, inner, inner, app->popup.text);
+        appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG "%s" ANSI_RESET,
+                ytop + 2, x0, star);
     }
     fwrite(ov, 1, on, stdout);
 
-    /* Controls, positioned just below the image. We run on the alternate screen
-       buffer (no scrollback), so scrolled sixel images are discarded rather than
-       retained — no per-frame scrollback clearing is needed here. */
+    /* Controls below the image (centred bar + hint). We run on the alternate
+       screen buffer (no scrollback), so scrolled sixel images are discarded
+       rather than retained — no per-frame scrollback clearing is needed here. */
     char ctl[2048];
     size_t n = 0;
     appendf(ctl, sizeof(ctl), &n, "\033[%d;1H", img_rows + 1);
-    append_controls(app, ctl, sizeof(ctl), &n);
-    appendf(ctl, sizeof(ctl), &n, ANSI_CLR_BELOW);
+    append_controls(app, ctl, sizeof(ctl), &n, img_rows, cols);
     fwrite(ctl, 1, n, stdout);
 
     fflush(stdout);
