@@ -27,6 +27,10 @@ cmake --build --preset release
 
 The binary is written to `build/<preset>/game-of-life`.
 
+If **OpenMP** is available it is used automatically to spread each generation's
+work across CPU cores (a big help on large patterns); without it the program
+builds and runs single-threaded. Set `OMP_NUM_THREADS` to tune the core count.
+
 ## Install / Uninstall
 
 Installation goes to the user's home by default (no root needed):
@@ -147,11 +151,14 @@ Press **`j`** (or the **Jump** button), type a target **generation**, and press
   rewind to a nearby generation is instant. A rewind further back than the ring
   reaches replays from generation 0 (Conway's Life is irreversible — a previous
   state can't be computed, only recalled or re-derived).
-- **Forward** fast-forwards by actually running the simulation, in small chunks
-  so the interface never freezes on a long jump; the progress is shown and you
-  can press `Esc` to stop early. Very long jumps on patterns whose population
-  grows without bound (glider guns, breeders) get slow and memory-hungry — that
-  is inherent to the current engine, which is why the jump is interruptible.
+- **Forward** fast-forwards by actually running the simulation; the progress is
+  shown and it stays interruptible throughout. During a jump, **`q` / `Ctrl-C`
+  quit the program immediately** and **`Esc`** aborts just the jump (input is
+  serviced continuously, so quit is honoured even mid-jump on a huge pattern).
+  Very long jumps on patterns whose population grows without bound (glider guns,
+  breeders) are still slow and memory-hungry — inherent to the current engine
+  (though the generation step is multi-core; see [Build](#build)) — which is why
+  the jump is interruptible.
 
 ### Saving & loading patterns (RLE)
 

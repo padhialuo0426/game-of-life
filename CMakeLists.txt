@@ -35,6 +35,17 @@ add_executable(game-of-life
 
 target_include_directories(game-of-life PRIVATE src)
 
+# Optional multi-core stepping. When OpenMP is available, sparse_step fans the
+# neighbour tally across cores (see src/sparse.c); without it the code compiles
+# and runs single-threaded (guarded by #ifdef _OPENMP).
+find_package(OpenMP)
+if(OpenMP_C_FOUND)
+    target_link_libraries(game-of-life PRIVATE OpenMP::OpenMP_C)
+    message(STATUS "OpenMP found: multi-core stepping enabled")
+else()
+    message(STATUS "OpenMP not found: stepping stays single-threaded")
+endif()
+
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(game-of-life PRIVATE
         -Wall -Wextra -Wpedantic

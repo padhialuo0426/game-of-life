@@ -67,10 +67,10 @@
 
 /* Jump / rewind. The history ring keeps the last HISTORY_CAP generations so a
    recent rewind is instant; a jump forward (or a deep rewind that must replay
-   from generation 0) advances JUMP_CHUNK generations at a time, checking for a
-   cancel key between chunks so a long jump never freezes the UI. */
+   from generation 0) advances continuously, servicing input on a wall-clock
+   interval (see run_forward / JUMP_SERVICE_MS) so a long jump never freezes the
+   UI and quit is honoured mid-jump. */
 #define HISTORY_CAP 1024
-#define JUMP_CHUNK 256
 #define JUMP_FIELD_MAX 1000000000L /* cap the typed target to keep it sane */
 
 /* Runtime speed control: the per-generation delay is nudged multiplicatively
@@ -741,30 +741,55 @@ static void enter_jump(App *app) {
     app->jump_editing = false;
 }
 
-/* Advance from the current generation to `target` (> current) in interruptible
-   chunks, so a long fast-forward neither freezes the UI nor floods it. Records
-   the trailing HISTORY_CAP generations so a later small rewind stays instant.
-   Esc or q stops early, leaving the world at whatever generation it reached. */
+/* Milliseconds between now and an earlier monotonic timestamp. */
+static long millis_since(const struct timespec *t0) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (now.tv_sec - t0->tv_sec) * 1000L +
+           (now.tv_nsec - t0->tv_nsec) / 1000000L;
+}
+
+/* Advance from the current generation to `target` (> current), servicing input
+   and redrawing on a wall-clock interval so quit stays responsive no matter how
+   slow a single generation is. Records the trailing HISTORY_CAP generations so a
+   later small rewind stays instant. During the jump: q / Ctrl-C quit the whole
+   program immediately (highest priority — as long as a generation itself hasn't
+   frozen, the quit is honoured within JUMP_SERVICE_MS); Esc aborts just the jump,
+   leaving the world at whatever generation it reached.
+
+   Servicing is time-based, not every-Nth-generation: a 250k-cell world spends
+   ~0.1s per generation (so we would poll far too rarely at a fixed chunk), while
+   a glider runs millions of generations a second (so polling every generation
+   would drown the run in read() syscalls). Checking a cheap monotonic clock each
+   generation and only touching the terminal every JUMP_SERVICE_MS gives bounded
+   quit latency at both extremes. */
+#define JUMP_SERVICE_MS 40
 static void run_forward(App *app, long target) {
     app->jumping = true;
     app->jump_target = target;
+    struct timespec last;
+    clock_gettime(CLOCK_MONOTONIC, &last);
     while (app->gen < target && app->running) {
-        long remaining = target - app->gen;
-        long n = remaining < JUMP_CHUNK ? remaining : JUMP_CHUNK;
-        for (long i = 0; i < n; i++) {
-            engine_advance(app->engine, 1);
-            app->gen++;
-            if (target - app->gen < (long)HISTORY_CAP) {
-                history_record(app->history, app->gen, engine_snapshot(app->engine));
-            }
+        engine_advance(app->engine, 1);
+        app->gen++;
+        if (target - app->gen < (long)HISTORY_CAP) {
+            history_record(app->history, app->gen, engine_snapshot(app->engine));
         }
-        if (app->follow) recenter_camera(app);
-        if (app->gen < target) {
-            render(app); /* show the fast-forward animation + progress line */
-            Key k = terminal_read_key(0);
-            if (k == KEY_ESC || k == KEY_QUIT) break; /* abort the jump */
+        if (millis_since(&last) >= JUMP_SERVICE_MS) {
+            /* Drain input first so a pending quit wins over drawing a frame. */
+            for (;;) {
+                Key k = terminal_read_key(0);
+                if (k == KEY_NONE) break;
+                if (k == KEY_QUIT) { app->running = false; break; } /* q / Ctrl-C */
+                if (k == KEY_ESC) goto done; /* abort the jump, stay in the app */
+            }
+            if (!app->running) break;
+            if (app->follow) recenter_camera(app);
+            render(app); /* progress animation + the "JUMPING …" line */
+            clock_gettime(CLOCK_MONOTONIC, &last);
         }
     }
+done:
     app->jumping = false;
 }
 

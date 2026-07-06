@@ -50,8 +50,11 @@ so the installed `~/.local/bin` binary stays current for the user to test.
   `s`/`l` file prompt. Engine-independent.
 - `src/sparse.{c,h}` — the current world engine behind `engine.c`: open-addressing
   hash set of live cells (SplitMix64 hash, backward-shift deletion). `sparse_step`
-  tallies neighbours; `sparse_query(x0,y0,x1,y1,fn)` iterates the live cells in a
-  rectangle (render + snapshot).
+  dispatches to a serial reference (`sparse_step_serial`) or, for worlds ≥20000
+  cells with OpenMP, a lock-free multi-core stepper (`sparse_step_parallel`,
+  y-band partitioning — see the changes note); both give identical results.
+  `sparse_query(x0,y0,x1,y1,fn)` iterates the live cells in a rectangle (render +
+  snapshot).
 - `src/sixel.{c,h}` — sixel bitmap encoder. Incremental `SixelCanvas`
   (`new/set_alive/set_cursor/encode/free`) plotted straight from the live-cell set;
   `sixel_render_board` is a thin Board wrapper on top. Palette: dead/alive/grid/cursor.
@@ -67,6 +70,34 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Responsive quit during a long jump + multi-core stepping.** For big
+  worlds (a 250k-cell Turing machine jumping thousands of gens took 10+ min and
+  wouldn't quit):
+  1. **Quit stays responsive.** `run_forward` was polling only once per
+     JUMP_CHUNK=256 generations; on a 250k-cell world a chunk is ~30s, so q/Ctrl-C
+     went unheard that long. It now services input+redraw on a **wall-clock
+     interval** (`JUMP_SERVICE_MS=40`, checked via a cheap `CLOCK_MONOTONIC` read
+     each generation — cheap at both extremes, vs a `read()` syscall per gen which
+     would cripple a fast glider jump). During a jump **q / Ctrl-C quit the whole
+     program immediately** (highest priority; input drained before drawing), while
+     **Esc** aborts only the jump. PTY-verified: q exits in ~0.12s mid-jump on a
+     1.5M-cell world; Esc leaves the app running.
+  2. **Multi-core `sparse_step` (OpenMP).** For worlds ≥ `SPARSE_PARALLEL_MIN`
+     (20000) cells the neighbour tally fans across cores. Design: split the world
+     into horizontal **y-bands**; each thread owns disjoint *output* rows [b0,b1)
+     and reads a one-row halo, so a cell's ±1-row neighbourhood is fully covered by
+     one thread — **no shared writes, no locks, no merge** (each thread has a
+     private count map + result set; `w->live` is read-only), and the union of the
+     per-band results equals the serial output bit-for-bit. Output rows run
+     [ymin-1, ymax+1] because a cell can be born one row beyond the extent. Live
+     cells are compacted into a contiguous array first so threads scan `len`, not
+     the (post-death, often much larger) table `cap`. CMake `find_package(OpenMP)`;
+     without it, `#ifdef _OPENMP` compiles the serial path. Validated bit-identical
+     to a naive dense oracle over 25 steps at T=1..32; ~2.6× at 8 threads (sparse
+     hashing is memory-bandwidth-bound, so it plateaus — the real order-of-magnitude
+     win for repetitive patterns is still Hashlife, Tier-1). Set `OMP_NUM_THREADS`
+     to tune. `sparse_step` dispatches: serial reference (`sparse_step_serial`) for
+     small worlds or if a parallel allocation fails (world left untouched).
 - **(Fedora) Sub-pixel zoom + RLE `-f` straight to the sparse engine.** Two changes
   so patterns much larger than the screen display whole:
   1. **Sub-pixel zoom.** The old zoom floor was 1 screen-pixel per cell, so a
@@ -279,6 +310,19 @@ marked DONE. When you pick one up, update this list.
 ## Gotchas / constraints for future work
 
 - **Keep the build warning-clean** under `-Wall -Wextra -Wpedantic`.
+- **The parallel `sparse_step` MUST stay bit-identical to the serial one.** It is a
+  performance optimisation, never a semantic change. Its correctness rests on the
+  y-band invariant (a thread owns disjoint output rows [b0,b1) and tallies input
+  rows [b0-1, b1], so its neighbour counts are complete and no two threads write
+  the same cell) and on output rows covering [ymin-1, ymax+1] (births one row past
+  the extent). If you touch it, re-run the dense-oracle parity test across several
+  `OMP_NUM_THREADS` values. OpenMP is optional (`find_package(OpenMP)`; guarded by
+  `#ifdef _OPENMP`) — the serial path must always compile and be the fallback.
+- **A long jump must service input on a wall-clock interval** (`JUMP_SERVICE_MS`),
+  not every N generations — one generation of a huge world can take ~0.1s, so a
+  fixed chunk makes quit unresponsive; conversely a `read()` per generation
+  cripples a fast small-pattern jump. During a jump, q/Ctrl-C quit the program
+  (drain input before drawing so quit wins), Esc aborts only the jump.
 - **One world only (unbounded/sparse).** Don't reintroduce Finite/Toroidal, a
   `WorldType`, or Canvas mode — the product is the infinite sandbox. `Board` is a
   transient seed buffer, not the sim state.
