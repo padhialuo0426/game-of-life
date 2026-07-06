@@ -108,6 +108,7 @@ typedef struct {
     int cam_x, cam_y;           /* viewport top-left in world coordinates */
     int view_w, view_h;         /* current viewport size in cells */
     int infinite_cell_px;       /* pixels per cell (mouse-wheel zoom level) */
+    bool follow;                /* auto-recentre the camera on the pattern */
 
     /* Left-drag panning (WORLD_INFINITE). While the left button is held, the
        camera is recomputed from the anchor captured on press so the grabbed
@@ -360,9 +361,10 @@ static void append_controls(const App *app, const Board *board,
         default:
             if (inf) {
                 appendf(buf, cap, n,
-                        " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   World: Infinite" EOL EOL,
+                        " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Follow: %s" EOL EOL,
                         sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
-                        sparse_count(app->sparse), app->infinite_cell_px);
+                        sparse_count(app->sparse), app->infinite_cell_px,
+                        app->follow ? "on" : "off");
             } else {
                 appendf(buf, cap, n,
                         " State: %s   Gen: %ld   Size: %dx%d   World: %s" EOL EOL,
@@ -399,7 +401,7 @@ static void append_controls(const App *app, const Board *board,
         default:
             if (inf) {
                 appendf(buf, cap, n,
-                        " Drag to pan   Wheel to zoom   Tab/Left/Right select   Space/Enter activate   q quit" CLR_EOL);
+                        " Drag pan   Wheel zoom   c center   f follow   Tab select   Space/Enter activate   q quit" CLR_EOL);
             } else {
                 appendf(buf, cap, n,
                         " Tab/Left/Right select   Space/Enter activate   q quit" CLR_EOL);
@@ -788,6 +790,8 @@ static void handle_mouse(App *app) {
     }
 }
 
+static void recenter_camera(App *app); /* defined below */
+
 static void handle_normal(App *app, Key key) {
     /* In the infinite world the mouse pans (left-drag) and zooms (wheel); the
        arrow keys always move the button selection (in every world). */
@@ -798,7 +802,10 @@ static void handle_normal(App *app, Key key) {
 
     switch (key) {
         case KEY_NONE:
-            if (app->sim == SIM_RUNNING) step_once(app);
+            if (app->sim == SIM_RUNNING) {
+                step_once(app);
+                if (app->world == WORLD_INFINITE && app->follow) recenter_camera(app);
+            }
             break;
         case KEY_TAB:
         case KEY_RIGHT:
@@ -811,12 +818,37 @@ static void handle_normal(App *app, Key key) {
         case KEY_SPACE:
             activate_button(app);
             break;
+        case KEY_OTHER:
+            /* Infinite world: 'c' recentres on the pattern once; 'f' toggles a
+               follow mode that recentres every generation. */
+            if (app->world == WORLD_INFINITE) {
+                const int c = terminal_char();
+                if (c == 'c' || c == 'C') {
+                    recenter_camera(app);
+                } else if (c == 'f' || c == 'F') {
+                    app->follow = !app->follow;
+                    if (app->follow) recenter_camera(app);
+                }
+            }
+            break;
         case KEY_QUIT:
             app->running = false;
             break;
         default:
             break;
     }
+}
+
+/* Centre the viewport on the live cells' bounding box (infinite world). No-op
+   when the world is empty. Uses the viewport size from the last rendered frame,
+   which is current except across a zoom/resize that has not been drawn yet. */
+static void recenter_camera(App *app) {
+    int minx, miny, maxx, maxy;
+    if (!sparse_bounds(app->sparse, &minx, &miny, &maxx, &maxy)) return;
+    const int mid_x = minx + (maxx - minx) / 2;
+    const int mid_y = miny + (maxy - miny) / 2;
+    app->cam_x = mid_x - app->view_w / 2;
+    app->cam_y = mid_y - app->view_h / 2;
 }
 
 /* Pan the viewport so the (infinite-world) edit cursor stays visible. */
