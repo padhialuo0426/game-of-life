@@ -59,8 +59,8 @@ cmake --build build/release --target uninstall
 
 ```sh
 ./build/release/game-of-life                              # 默认 / 上次记住的配置
-./build/release/game-of-life -f patterns/glider.cells    # 加载图案文件
-./build/release/game-of-life -f patterns/pulsar.cells -w 40 -h 24  # 种子区域大小
+./build/release/game-of-life -f saves/glider.rle         # 加载图案文件
+./build/release/game-of-life -f saves/pulsar.rle -w 40 -h 24       # 种子区域大小
 ./build/release/game-of-life --help                      # 全部选项
 ```
 
@@ -233,38 +233,39 @@ $XDG_CONFIG_HOME/game-of-life/settings.json
 
 ```sh
 mkdir -p ~/.local/share/game-of-life/saves
-cp patterns/pulsar.rle ~/.local/share/game-of-life/saves/default.rle
+cp saves/pulsar.rle ~/.local/share/game-of-life/saves/default.rle
 ```
 
 ### 内置图案
 
-`patterns/` 目录里有一批经典生命游戏图案。可在启动时用 `-f patterns/<名字>.cells`
-加载，或在程序内按 `l` 键加载对应的 `.rle` 文件（每个图案都提供了两种格式）：
+`saves/` 目录里有一批经典生命游戏图案（`.rle`）。**安装时会把它们复制到你的存档目录**，
+所以在程序内按 `l` 打开 **Load** 浏览器就能直接看到、加载。也可在启动时用
+`-f saves/<名字>.rle` 加载：
 
 | 文件 | 类型 |
 | --- | --- |
-| `default.cells` | 滑翔机（安装为默认图案） |
-| `glider.cells` | 滑翔机——飞船，周期 4 |
-| `lwss.cells` | 轻量级飞船（LWSS） |
-| `blinker.cells` | 振荡器，周期 2 |
-| `toad.cells` | 振荡器，周期 2 |
-| `beacon.cells` | 振荡器，周期 2 |
-| `pulsar.cells` | 振荡器，周期 3 |
-| `pentadecathlon.cells` | 振荡器，周期 15 |
-| `block.cells` | 静物 |
-| `beehive.cells` | 静物 |
-| `r-pentomino.cells` | 玛土撒拉（1103 代后稳定） |
-| `acorn.cells` | 玛土撒拉（5206 代后稳定） |
-| `diehard.cells` | 玛土撒拉（130 代后完全消失） |
-| `glider-gun.cells` | 高斯帕滑翔机枪（需要较宽的画布） |
+| `default.rle` | 滑翔机（安装为自动加载的默认图案） |
+| `glider.rle` | 滑翔机——飞船，周期 4 |
+| `lwss.rle` | 轻量级飞船（LWSS） |
+| `blinker.rle` | 振荡器，周期 2 |
+| `toad.rle` | 振荡器，周期 2 |
+| `beacon.rle` | 振荡器，周期 2 |
+| `pulsar.rle` | 振荡器，周期 3 |
+| `pentadecathlon.rle` | 振荡器，周期 15 |
+| `block.rle` | 静物 |
+| `beehive.rle` | 静物 |
+| `r-pentomino.rle` | 玛土撒拉（1103 代后稳定） |
+| `acorn.rle` | 玛土撒拉（5206 代后稳定） |
+| `diehard.rle` | 玛土撒拉（130 代后完全消失） |
+| `glider-gun.rle` | 高斯帕滑翔机枪 |
 
-## 配置文件格式
+## 图案格式
 
-经典 `.cells` 纯文本格式的一个子集（见 `patterns/`）：
+全程使用的交换格式是社区标准的 **RLE**（`saves/` 目录与程序内 Save/Load）。若你手头有
+经典 `.cells` 纯文本格式的文件，仍可用 `-f 名字.cells` 显式加载：
 
 - 以 `!` 或 `#` 开头的行是注释。
 - 图案行中，`.` 或空格表示死细胞；其他任意字符（通常是 `O`）表示活细胞。
-- 图案会居中放入画布；超出画布的格子被裁剪。
 
 ```
 ! Glider

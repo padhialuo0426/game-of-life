@@ -1,6 +1,0 @@
-! Default pattern (a glider)
-! This is the pattern the program auto-loads when run without -f, once
-! installed to ~/.config/game-of-life/default.cells.
-.O.
-..O
-OOO

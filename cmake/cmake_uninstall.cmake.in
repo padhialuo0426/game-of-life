@@ -39,8 +39,8 @@ if(EXISTS "${cfg_dir}")
     endif()
 endif()
 
-# --- Data directory: the installed default pattern only ---------------------
-# Remove default.rle (which we installed) but NEVER the user's own saved
+# --- Data directory: the bundled patterns we shipped ------------------------
+# Remove exactly the patterns install put there, but NEVER the user's own saved
 # patterns; the saves and data directories are removed only if they end up empty.
 set(data_home "$ENV{XDG_DATA_HOME}")
 if(data_home STREQUAL "")
@@ -49,13 +49,17 @@ endif()
 set(data_dir "${data_home}/game-of-life")
 set(saves_dir "${data_dir}/saves")
 
-set(defpat "${saves_dir}/default.rle")
-if(EXISTS "${defpat}")
-    message(STATUS "Removing ${defpat}")
-    file(REMOVE "${defpat}")
-else()
-    message(STATUS "Not found (skipped): ${defpat}")
-endif()
+set(bundled "@GOL_BUNDLED_PATTERNS_STR@")
+separate_arguments(bundled)
+foreach(pat ${bundled})
+    set(f "${saves_dir}/${pat}")
+    if(EXISTS "${f}")
+        message(STATUS "Removing ${f}")
+        file(REMOVE "${f}")
+    else()
+        message(STATUS "Not found (skipped): ${f}")
+    endif()
+endforeach()
 
 foreach(dir "${saves_dir}" "${data_dir}")
     if(EXISTS "${dir}")

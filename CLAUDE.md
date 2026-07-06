@@ -99,9 +99,10 @@ so the installed `~/.local/bin` binary stays current for the user to test.
     settings in `$XDG_CONFIG_HOME` (config). The startup default moved there as
     **`default.rle`** (loaded via `load_rle_file`; `build_initial` no longer reads
     `default.cells`). New `settings_data_dir`/`settings_saves_dir`/`settings_mkdirs`.
-    CMake installs `patterns/default.rle` into the saves dir (not `default.cells`
-    into config); uninstall removes `default.rle` + legacy `default.cells` but
-    never the user's own saves. PTY-verified: save→file on disk, load list +
+    CMake installs **all bundled patterns** (`saves/*.rle`) into the saves dir so
+    they show up in the Load browser (never clobbering an existing file); uninstall
+    removes exactly the shipped set (baked-in name list) + legacy `default.cells`
+    but never the user's own saves. PTY-verified: save→file on disk, load list +
     sort + arrow-nav + delete + overwrite/replace confirms + mouse clicks on
     buttons, sort headers, type-path, and rows.
 - **(Fedora) Responsive quit during a long jump + multi-core stepping.** For big
@@ -167,8 +168,9 @@ so the installed `~/.local/bin` binary stays current for the user to test.
   terminal.c now records the raw byte for **every** key so filenames can contain
   'q' (only Ctrl-C quits in text entry). rle.c unit-tested (canonical glider parse,
   round-trip, empty); PTY-tested in-app (save→clear→load, q-in-filename).
-  `patterns/` now ships every pattern in **both** `.cells` (for `-f`/default) and
-  `.rle` (for in-app `l`). Startup `-f`/default dispatch on extension via
+  `patterns/` then shipped every pattern in **both** `.cells` and `.rle` (later
+  superseded: the `.cells` copies were dropped and the `.rle` files moved to
+  `saves/`, installed into the user's saves dir). Startup `-f`/default dispatch on extension via
   `load_pattern_file()` in main.c: `.rle` → rle.c (centred into the seed board like
   a `.cells` pattern), anything else → config.c. So `-f foo.rle` and `-f foo.cells`
   seed identically (verified equal for blinker/glider/glider-gun/pulsar/lwss/acorn).

@@ -64,8 +64,8 @@ Notes:
 
 ```sh
 ./build/release/game-of-life                              # default / remembered
-./build/release/game-of-life -f patterns/glider.cells    # load a pattern file
-./build/release/game-of-life -f patterns/pulsar.cells -w 40 -h 24  # seed-region size
+./build/release/game-of-life -f saves/glider.rle         # load a pattern file
+./build/release/game-of-life -f saves/pulsar.rle -w 40 -h 24       # seed-region size
 ./build/release/game-of-life --help                      # all options
 ```
 
@@ -272,40 +272,42 @@ overwrite it (or just save over it from inside the app with the name
 
 ```sh
 mkdir -p ~/.local/share/game-of-life/saves
-cp patterns/pulsar.rle ~/.local/share/game-of-life/saves/default.rle
+cp saves/pulsar.rle ~/.local/share/game-of-life/saves/default.rle
 ```
 
 ### Included patterns
 
-The `patterns/` directory contains classic Life patterns. Load one at startup
-with `-f patterns/<name>.cells`, or from inside the app with the `l` key using
-the matching `.rle` file (each pattern is provided in both formats):
+The `saves/` directory holds a set of classic Life patterns as `.rle`. **Install
+copies them into your saves folder**, so they show up straight away in the in-app
+**Load** browser (`l`). You can also load one at startup with
+`-f saves/<name>.rle`:
 
 | File | Type |
 | --- | --- |
-| `default.cells` | Glider (installed as the default) |
-| `glider.cells` | Glider — spaceship, period 4 |
-| `lwss.cells` | Lightweight spaceship |
-| `blinker.cells` | Oscillator, period 2 |
-| `toad.cells` | Oscillator, period 2 |
-| `beacon.cells` | Oscillator, period 2 |
-| `pulsar.cells` | Oscillator, period 3 |
-| `pentadecathlon.cells` | Oscillator, period 15 |
-| `block.cells` | Still life |
-| `beehive.cells` | Still life |
-| `r-pentomino.cells` | Methuselah (stabilises after 1103 gens) |
-| `acorn.cells` | Methuselah (stabilises after 5206 gens) |
-| `diehard.cells` | Methuselah (vanishes after 130 gens) |
-| `glider-gun.cells` | Gosper glider gun (needs a wide board) |
+| `default.rle` | Glider (installed as the auto-loaded default) |
+| `glider.rle` | Glider — spaceship, period 4 |
+| `lwss.rle` | Lightweight spaceship |
+| `blinker.rle` | Oscillator, period 2 |
+| `toad.rle` | Oscillator, period 2 |
+| `beacon.rle` | Oscillator, period 2 |
+| `pulsar.rle` | Oscillator, period 3 |
+| `pentadecathlon.rle` | Oscillator, period 15 |
+| `block.rle` | Still life |
+| `beehive.rle` | Still life |
+| `r-pentomino.rle` | Methuselah (stabilises after 1103 gens) |
+| `acorn.rle` | Methuselah (stabilises after 5206 gens) |
+| `diehard.rle` | Methuselah (vanishes after 130 gens) |
+| `glider-gun.rle` | Gosper glider gun |
 
-## Config file format
+## Pattern formats
 
-A subset of the classic `.cells` plaintext format (see `patterns/`):
+The interchange format throughout is the community-standard **RLE** (`saves/` and
+the in-app Save/Load). The classic `.cells` plaintext format is still accepted for
+an explicit `-f name.cells` if you have one:
 
 - Lines beginning with `!` or `#` are comments.
 - In pattern lines, `.` or space is a dead cell; any other character
   (typically `O`) is a live cell.
-- The pattern is centered inside the board; cells outside the board are clipped.
 
 ```
 ! Glider
