@@ -66,6 +66,11 @@
 #define JUMP_CHUNK 256
 #define JUMP_FIELD_MAX 1000000000L /* cap the typed target to keep it sane */
 
+/* Runtime speed control: the per-generation delay is nudged multiplicatively
+   between "as fast as possible" (0 ms) and SPEED_MAX_DELAY_MS. */
+#define SPEED_MAX_DELAY_MS 2000
+#define SPEED_MIN_DELAY_MS 10  /* smallest non-zero delay before snapping to 0 */
+
 /* Top-level interaction mode. */
 typedef enum { UI_NORMAL, UI_EDIT, UI_JUMP } UiMode;
 
@@ -187,8 +192,8 @@ static void print_usage(const char *prog) {
     printf("Settings such as the seed-region size are remembered between runs in\n");
     printf("~/.config/game-of-life/settings.json.\n\n");
     printf("Buttons: Start Pause Step Reset Edit Jump   (q quits from anywhere)\n");
-    printf("Normal:  drag pan   wheel zoom   c center   f follow   j jump\n");
-    printf("         Tab select   Space/Enter activate   q quit\n");
+    printf("Normal:  drag pan   wheel zoom   +/- speed   c center   f follow\n");
+    printf("         j jump   x clear   Tab select   Space/Enter activate   q quit\n");
     printf("Edit:    arrows move cursor   Space toggle cell   Tab/Esc leave\n");
     printf("Jump:    type a generation (forward or back)   Enter jump   Esc cancel\n");
 }
@@ -323,10 +328,10 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
                 app->cursor_x, app->cursor_y, engine_population(app->engine));
     } else {
         appendf(buf, cap, n,
-                " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Follow: %s" EOL EOL,
+                " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Delay: %ldms   Follow: %s" EOL EOL,
                 sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
                 engine_population(app->engine), app->infinite_cell_px,
-                app->follow ? "on" : "off");
+                app->delay_ms, app->follow ? "on" : "off");
     }
 
     /* Button bar; selection is highlighted only in normal mode. */
@@ -355,7 +360,7 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
                 " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
     } else {
         appendf(buf, cap, n,
-                " Drag pan   Wheel zoom   c center   f follow   j jump   x clear   Tab select   Space/Enter activate   q quit" CLR_EOL);
+                " Drag pan   Wheel zoom   +/- speed   c center   f follow   j jump   x clear   Tab select   Space/Enter go   q quit" CLR_EOL);
     }
 }
 
@@ -506,6 +511,21 @@ static void clear_world(App *app) {
     history_clear(app->history);
     app->gen = 0;
     app->sim = SIM_STOPPED;
+}
+
+/* Nudge the running speed. dir > 0 speeds up (less delay), dir < 0 slows down.
+   Multiplicative so one keypress covers the whole 0..SPEED_MAX_DELAY_MS range in
+   a few presses; snaps to 0 ms ("max speed") below SPEED_MIN_DELAY_MS. */
+static void adjust_speed(App *app, int dir) {
+    long d = app->delay_ms;
+    if (dir > 0) {
+        d = (d <= SPEED_MIN_DELAY_MS) ? 0 : (long)(d * 0.7);
+    } else {
+        d = (d == 0) ? SPEED_MIN_DELAY_MS : (long)(d * 1.4) + 1;
+    }
+    if (d < 0) d = 0;
+    if (d > SPEED_MAX_DELAY_MS) d = SPEED_MAX_DELAY_MS;
+    app->delay_ms = d;
 }
 
 /* Enter the jump prompt (type a target generation). */
@@ -719,6 +739,10 @@ static void handle_normal(App *app, Key key) {
                     enter_jump(app);
                 } else if (c == 'x' || c == 'X') {
                     clear_world(app);
+                } else if (c == '+' || c == '=') {
+                    adjust_speed(app, +1);
+                } else if (c == '-' || c == '_') {
+                    adjust_speed(app, -1);
                 }
             }
             break;
