@@ -81,8 +81,12 @@ so the installed `~/.local/bin` binary stays current for the user to test.
     Clicks in the controls area never pan. Added **Save** and **Load** buttons
     (bar is now Start Pause Step Reset Edit Jump Save Load).
   - **Save/Load dialogs** replace the old blind filename prompt (`UI_FILE` → three
-    modes `UI_SAVE_NAME`, `UI_LOAD_LIST`, `UI_CONFIRM`; `render_dialog()` takes the
-    full text area, hiding the sixel image and force-redrawing it on return).
+    modes `UI_SAVE_NAME`, `UI_LOAD_LIST`, `UI_CONFIRM`). `render_dialog()` draws a
+    **centred modal window** — a black ASCII-bordered box floating over the world
+    (not a full-screen takeover): it overlays only the box cells (the world shows
+    around it), records mouse hit boxes in the box's screen coordinates, and the
+    covered image is force-redrawn on return (`sx_drawn=false`, so the next
+    `emit_frame` clears + repaints). `dlg_row()` places content lines inside.
     *Save*: type a name (sanitised: no empty/leading-'.'/'/'), `.rle` auto-appended,
     overwrite confirm. *Load*: a scrollable, sortable list (columns Name/Size/
     Modified; `n`/`s`/`m` or click the header to sort, again reverses; default

@@ -546,114 +546,170 @@ static void fmt_mtime(long t, char *buf, size_t cap) {
     strftime(buf, cap, "%Y-%m-%d %H:%M", &tm);
 }
 
-/* Draw a full-screen text dialog (save / load / confirm) in place of the world
-   image, and record hit boxes for the mouse. The image is force-redrawn on the
-   next normal frame (sx_drawn cleared). */
+/* Window colours: black background, bright text. */
+#define DLG_BG "\033[40;37m"
+
+/* Print one content line inside the modal at content-line `line` (0-based within
+   the window's content area whose top-left is 0-based (cy, cx)). `text` may embed
+   its own SGR (e.g. reverse for a selection); it is drawn over the already-black
+   box, so short lines need no padding. */
+static void dlg_row(char *buf, size_t cap, size_t *n, int cy, int cx, int line,
+                    const char *text) {
+    appendf(buf, cap, n, "\033[%d;%dH" DLG_BG "%s" ANSI_RESET,
+            cy + line + 1, cx + 1, text);
+}
+
+/* Draw a centred modal window (save / load / confirm) as a black bordered box
+   floating over the world image, and record the mouse hit boxes in screen
+   coordinates. The world around the box is left untouched; the image the box
+   covers is force-redrawn on the next normal frame (sx_drawn cleared). */
 static void render_dialog(App *app) {
     int cols, rows;
     if (!terminal_size(&cols, &rows)) { cols = 80; rows = 24; }
-    if (rows < 8) rows = 8;
     if (cols < 24) cols = 24;
+    if (rows < 10) rows = 10;
+
+    /* Centre the box with a margin so the world shows around it. */
+    int mxn = cols / 8; if (mxn < 3) mxn = 3; if (mxn > 12) mxn = 12;
+    int myn = rows / 6; if (myn < 1) myn = 1; if (myn > 6) myn = 6;
+    int w = cols - 2 * mxn; if (w > 504) w = 504; if (w < 34) w = (cols < 34 ? cols : 34);
+    int h = rows - 2 * myn; if (h < 9) h = (rows < 9 ? rows : 9);
+    int x0 = (cols - w) / 2; if (x0 < 0) x0 = 0; /* box top-left, 0-based */
+    int y0 = (rows - h) / 2; if (y0 < 0) y0 = 0;
+    int cx = x0 + 2;   /* content left, 0-based (1 border + 1 pad) */
+    int cw = w - 4;    /* content width */
+    int cy = y0 + 1;   /* content top row, 0-based */
+    int chh = h - 2;   /* content rows */
+    if (cw < 10) cw = 10;
 
     char dir[768];
     if (!settings_saves_dir(dir, sizeof(dir))) snprintf(dir, sizeof(dir), "(unknown)");
 
-    size_t bcap = (size_t)(rows + 6) * (size_t)(cols + 64) + 512;
+    size_t bcap = (size_t)(h + 4) * (size_t)(w * 2 + 160) + 4096;
     char *buf = malloc(bcap);
     if (buf == NULL) return;
     size_t n = 0;
-    appendf(buf, bcap, &n, ANSI_HOME);
-
     app->bar_row = -1;
     app->dlg_sort_row = app->dlg_typepath_row = app->dlg_list_row0 = -1;
 
-    if (app->mode == UI_SAVE_NAME) {
-        appendf(buf, bcap, &n, " Save pattern" EOL " Folder: %s" EOL EOL, dir);
-        appendf(buf, bcap, &n, " Save as: " ANSI_REVERSE "%s " ANSI_RESET
-                ".rle" EOL EOL, app->file_buf);
-        appendf(buf, bcap, &n,
-                " Type a name   Enter save   Esc cancel"
-                "   (.rle is added automatically)" EOL);
-        if (app->msg[0]) appendf(buf, bcap, &n, EOL " %s" EOL, app->msg);
-    } else if (app->mode == UI_CONFIRM) {
-        appendf(buf, bcap, &n, EOL " %s" EOL EOL, app->confirm_msg);
-        appendf(buf, bcap, &n, " y = yes     n / Esc = no" EOL);
-    } else { /* UI_LOAD_LIST */
-        appendf(buf, bcap, &n, " Load pattern" EOL " Folder: %s" EOL EOL, dir);
-
-        /* Sort row (row index 3). */
-        app->dlg_sort_row = 3;
-        appendf(buf, bcap, &n, " Sort: ");
-        int col = 8; /* " Sort: " = 1 space + 6 chars + the space after ':' */
-        const char *snames[3] = {"Name", "Size", "Modified"};
-        for (int k = 0; k < 3; k++) {
-            int w = (int)strlen(snames[k]) + 2;
-            app->dlg_sort_c0[k] = col;
-            app->dlg_sort_c1[k] = col + w;
-            if ((int)app->sort_key == k) {
-                appendf(buf, bcap, &n, ANSI_REVERSE "[%s]" ANSI_RESET " ", snames[k]);
-            } else {
-                appendf(buf, bcap, &n, "[%s] ", snames[k]);
-            }
-            col += w + 1;
-        }
-        appendf(buf, bcap, &n, "(%s)" EOL, app->sort_desc ? "desc" : "asc");
-
-        /* Type-a-path row (row index 4). */
-        app->dlg_typepath_row = 4;
-        if (app->load_typing) {
-            appendf(buf, bcap, &n, " Path: " ANSI_REVERSE "%s " ANSI_RESET
-                    "  Enter load   Esc back" EOL, app->file_buf);
+    /* 1) Frame: black fill + ASCII border, overlaid on the world. */
+    char hbar[520], sp[520];
+    int inner = w - 2; if (inner < 0) inner = 0; if (inner > 518) inner = 518;
+    memset(hbar, '-', (size_t)inner); hbar[inner] = '\0';
+    memset(sp, ' ', (size_t)inner); sp[inner] = '\0';
+    for (int r = 0; r < h; r++) {
+        if (r == 0 || r == h - 1) {
+            appendf(buf, bcap, &n, "\033[%d;%dH" DLG_BG "+%s+" ANSI_RESET,
+                    y0 + r + 1, x0 + 1, hbar);
         } else {
-            appendf(buf, bcap, &n, " [Type a path…]  (press /)" EOL);
+            appendf(buf, bcap, &n, "\033[%d;%dH" DLG_BG "|%s|" ANSI_RESET,
+                    y0 + r + 1, x0 + 1, sp);
         }
+    }
 
-        /* Column header (row 5) + list (from row 6). */
-        int namew = cols - 32;
-        if (namew < 10) namew = 10;
-        appendf(buf, bcap, &n, " %-*s %8s   %s" EOL, namew, "NAME", "SIZE", "MODIFIED");
+    /* 2) Content, written over the black box. */
+    char line[1024];
+    if (app->mode == UI_SAVE_NAME) {
+        dlg_row(buf, bcap, &n, cy, cx, 0, "Save pattern");
+        snprintf(line, sizeof(line), "Folder: %.*s", cw - 8, dir);
+        dlg_row(buf, bcap, &n, cy, cx, 1, line);
+        snprintf(line, sizeof(line), "Save as: \033[7m%s \033[0m" DLG_BG ".rle",
+                 app->file_buf);
+        dlg_row(buf, bcap, &n, cy, cx, 3, line);
+        dlg_row(buf, bcap, &n, cy, cx, 5,
+                "Enter save    Esc cancel    (.rle added automatically)");
+        if (app->msg[0]) {
+            snprintf(line, sizeof(line), "%.*s", cw, app->msg);
+            dlg_row(buf, bcap, &n, cy, cx, 7, line);
+        }
+    } else if (app->mode == UI_CONFIRM) {
+        int midr = chh / 2 - 1; if (midr < 1) midr = 1;
+        snprintf(line, sizeof(line), "%.*s", cw, app->confirm_msg);
+        dlg_row(buf, bcap, &n, cy, cx, midr, line);
+        dlg_row(buf, bcap, &n, cy, cx, midr + 2, "y = yes        n / Esc = no");
+    } else { /* UI_LOAD_LIST */
+        dlg_row(buf, bcap, &n, cy, cx, 0, "Load pattern");
+        snprintf(line, sizeof(line), "Folder: %.*s", cw - 8, dir);
+        dlg_row(buf, bcap, &n, cy, cx, 1, line);
 
-        app->dlg_list_row0 = 6;
-        int visible = rows - app->dlg_list_row0 - 1; /* leave the footer row */
-        if (visible < 1) visible = 1;
-        app->save_visible = visible;
+        /* Sort row (content line 3). */
+        app->dlg_sort_row = cy + 3;
+        int p = 0, visc = cx; /* visc: 0-based screen col of next visible char */
+        p += snprintf(line + p, sizeof(line) - (size_t)p, "Sort: ");
+        visc += 6;
+        const char *sn[3] = {"Name", "Size", "Modified"};
+        for (int k = 0; k < 3; k++) {
+            int wl = (int)strlen(sn[k]) + 2;
+            app->dlg_sort_c0[k] = visc;
+            app->dlg_sort_c1[k] = visc + wl;
+            if ((int)app->sort_key == k) {
+                p += snprintf(line + p, sizeof(line) - (size_t)p,
+                              "\033[7m[%s]\033[0m" DLG_BG " ", sn[k]);
+            } else {
+                p += snprintf(line + p, sizeof(line) - (size_t)p, "[%s] ", sn[k]);
+            }
+            visc += wl + 1;
+        }
+        snprintf(line + p, sizeof(line) - (size_t)p, "(%s)",
+                 app->sort_desc ? "desc" : "asc");
+        dlg_row(buf, bcap, &n, cy, cx, 3, line);
+
+        /* Type-a-path row (content line 4). */
+        app->dlg_typepath_row = cy + 4;
+        if (app->load_typing) {
+            snprintf(line, sizeof(line),
+                     "Path: \033[7m%s \033[0m" DLG_BG "  Enter load  Esc back",
+                     app->file_buf);
+        } else {
+            snprintf(line, sizeof(line), "[Type a path...]  (press /)");
+        }
+        dlg_row(buf, bcap, &n, cy, cx, 4, line);
+
+        /* Header (content line 5) + list (from content line 6). */
+        int namew = cw - 30; if (namew < 8) namew = 8;
+        snprintf(line, sizeof(line), "%-*.*s %8s  %s", namew, namew,
+                 "NAME", "SIZE", "MODIFIED");
+        dlg_row(buf, bcap, &n, cy, cx, 5, line);
+
+        app->dlg_list_row0 = cy + 6;
+        int listvis = chh - 6 - 1; /* leave the footer row */
+        if (listvis < 1) listvis = 1;
+        app->save_visible = listvis;
         if (app->save_sel < app->save_top) app->save_top = app->save_sel;
-        if (app->save_sel >= app->save_top + visible)
-            app->save_top = app->save_sel - visible + 1;
+        if (app->save_sel >= app->save_top + listvis)
+            app->save_top = app->save_sel - listvis + 1;
         if (app->save_top < 0) app->save_top = 0;
 
         if (app->save_count == 0) {
-            appendf(buf, bcap, &n,
-                    " (no saved patterns here — press / to type a path)" EOL);
-            for (int i = 1; i < visible; i++) appendf(buf, bcap, &n, EOL);
+            dlg_row(buf, bcap, &n, cy, cx, 6,
+                    "(no saved patterns — press / to type a path)");
         } else {
-            for (int i = 0; i < visible; i++) {
+            for (int i = 0; i < listvis; i++) {
                 int idx = app->save_top + i;
-                if (idx >= app->save_count) { appendf(buf, bcap, &n, EOL); continue; }
+                if (idx >= app->save_count) break;
                 SaveEntry *se = &app->saves[idx];
-                char szb[24], tb[24], nm[256];
+                char szb[24], tb[24], nm[260];
                 human_size(se->size, szb, sizeof(szb));
                 fmt_mtime(se->mtime, tb, sizeof(tb));
                 snprintf(nm, sizeof(nm), "%.*s", namew, se->name);
                 if (idx == app->save_sel) {
-                    appendf(buf, bcap, &n, ANSI_REVERSE " %-*s %8s   %s" ANSI_RESET EOL,
-                            namew, nm, szb, tb);
+                    snprintf(line, sizeof(line),
+                             "\033[7m%-*s %8s  %s\033[0m" DLG_BG, namew, nm, szb, tb);
                 } else {
-                    appendf(buf, bcap, &n, " %-*s %8s   %s" EOL, namew, nm, szb, tb);
+                    snprintf(line, sizeof(line), "%-*s %8s  %s", namew, nm, szb, tb);
                 }
+                dlg_row(buf, bcap, &n, cy, cx, 6 + i, line);
             }
         }
-        appendf(buf, bcap, &n,
-                " Up/Down move   Enter/click load   d delete   / type path   "
-                "Esc cancel" CLR_EOL);
+        dlg_row(buf, bcap, &n, cy, cx, chh - 1,
+                "Up/Dn move  Enter/click load  d delete  / path  Esc cancel");
     }
 
-    appendf(buf, bcap, &n, ANSI_CLR_BELOW);
     fwrite(buf, 1, n, stdout);
     fflush(stdout);
     free(buf);
 
-    /* Next normal frame must repaint the image the dialog covered. */
+    /* Next normal frame must repaint the image the box covered. */
     app->sx_drawn = false;
     app->sx_last_w = app->sx_last_h = -1;
 }
