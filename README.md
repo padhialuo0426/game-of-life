@@ -82,9 +82,12 @@ size is the current zoom level.
 | --- | --- |
 | **drag** (left button) | pan the view (grab-and-drag) |
 | **mouse wheel** | zoom in / out, anchored on the cursor |
+| `+` / `-` | speed the simulation up / slow it down |
 | `c` | recentre the view on the pattern |
 | `f` | toggle follow mode (auto-recentre every generation) |
 | `j` | jump to a generation (see below) |
+| `x` | clear the world to a blank slate |
+| `s` / `l` | save / load a pattern file (RLE — see below) |
 | `Tab` or `Right` | move selection to the next button |
 | `Left` | move selection to the previous button |
 | `Space` or `Enter` | activate the selected button |
@@ -145,6 +148,25 @@ Press **`j`** (or the **Jump** button), type a target **generation**, and press
   can press `Esc` to stop early. Very long jumps on patterns whose population
   grows without bound (glider guns, breeders) get slow and memory-hungry — that
   is inherent to the current engine, which is why the jump is interruptible.
+
+### Saving & loading patterns (RLE)
+
+Press **`s`** to save or **`l`** to load, type a filename, and press `Enter`
+(`Esc` cancels; the path is relative to the directory you launched from).
+
+The format is the community-standard **RLE** (the one Golly and
+[LifeWiki](https://conwaylife.com/wiki/) use), so you can load guns, spaceships
+and other patterns downloaded from the wiki, and save your own creations to
+share. Loading replaces the world and centres the pattern in the view; saving
+writes every live cell of the current world. For example, a saved glider is:
+
+```
+x = 3, y = 3, rule = B3/S23
+bo$2bo$3o!
+```
+
+(The `.cells` format is still accepted for the default pattern and `-f`; RLE is
+the interchange format for save/load because it stays compact for big patterns.)
 
 ### Sixel rendering
 

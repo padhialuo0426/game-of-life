@@ -45,6 +45,9 @@ so the installed `~/.local/bin` binary stays current for the user to test.
   tagged by generation, for instant rewind. Direct-mapped (`gen % cap`), with
   branch-detection: recording a non-contiguous gen clears the ring (timeline
   changed). `history_floor(gen)` finds the nearest replay base.
+- `src/rle.{c,h}` — read/write the community-standard RLE pattern format
+  (`rle_load` → malloc'd (x,y) array; `rle_save` from an (x,y) array). Used by the
+  `s`/`l` file prompt. Engine-independent.
 - `src/sparse.{c,h}` — the current world engine behind `engine.c`: open-addressing
   hash set of live cells (SplitMix64 hash, backward-shift deletion). `sparse_step`
   tallies neighbours; `sparse_query(x0,y0,x1,y1,fn)` iterates the live cells in a
@@ -64,6 +67,13 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) RLE save/load, clear, runtime speed.** `s`/`l` open a filename prompt
+  (UI_FILE) to save/load community-standard **RLE** (`rle.{c,h}`; the format Golly/
+  LifeWiki use). Load replaces the world, centres it, snapshots restart. `x` clears
+  to a blank slate. `+`/`-` nudge `delay_ms` (0..2000ms, shown on the status line).
+  terminal.c now records the raw byte for **every** key so filenames can contain
+  'q' (only Ctrl-C quits in text entry). rle.c unit-tested (canonical glider parse,
+  round-trip, empty); PTY-tested in-app (save→clear→load, q-in-filename).
 - **(Fedora) Jump: rewind + fast-forward, with an engine seam for Hashlife.**
   New `LifeEngine`/`EngineSnapshot` abstraction (`engine.{c,h}`) and a bounded
   history ring (`history.{c,h}`). `j` / the **Jump** button opens a prompt: type
@@ -193,14 +203,14 @@ marked DONE. When you pick one up, update this list.
   Toroidal + Canvas removed; see changes list.
 - ~~Jump (rewind + fast-forward)~~ **DONE (2026-07-06)** — history ring + chunked
   interruptible fast-forward, on a `LifeEngine` seam ready for Hashlife. See changes.
+- ~~Runtime speed control (`+`/`-`)~~ **DONE (2026-07-06)**.
+- ~~Clear-to-empty (`x`)~~ **DONE (2026-07-06)**.
+- ~~RLE save/load (`s`/`l`)~~ **DONE (2026-07-06)** — `rle.{c,h}`.
 - **Advice to the iTerm2 user (not code):** update iTerm2 to ≥ 3.7.0beta1 — the
   actual fix for the image-retention memory blow-up.
 
 ### Tier 1 — quick wins (next up)
-1. **Runtime speed control.** `delay_ms` is currently fixed at launch (`-d` only).
-   Add `+`/`-` (or `[`/`]`) to change it live, with the current speed on the status
-   line. Small code; essential for actually watching evolution. **Recommended next.**
-2. **Hashlife backend.** The `engine.{c,h}` seam is in place: implement a hashed
+1. **Hashlife backend.** The `engine.{c,h}` seam is in place: implement a hashed
    -quadtree engine behind `LifeEngine` so `engine_advance` can leap over huge
    generation counts (guns/breeders) that the sparse stepper handles only in
    O(N²). `EngineSnapshot` would become a canonical node id (O(1) to keep, making
@@ -208,17 +218,13 @@ marked DONE. When you pick one up, update this list.
    growing patterns starts to hurt.
 
 ### Tier 2 — nice to have
-2. **Large-pattern save/load (RLE).** Real sandbox persistence: load the community
-   -standard `.rle` format (guns, spaceships — `.cells` is inefficient for big
-   patterns) and save the current world back out. High value, **largest effort**
-   (new parser + writer).
-3. **Clear-to-empty action.** One key to blank the world and draw from scratch
-   (`sparse_clear` already exists). Tiny.
-4. **Keyboard zoom (`+`/`-`).** Zoom without a mouse. Tiny. (Mind the collision if
-   `+`/`-` is taken by speed control in Tier-1 item 1 — pick distinct keys.)
+2. **Keyboard zoom.** Zoom without a mouse. Tiny — but `+`/`-` are now the speed
+   keys, so use different keys (e.g. `,`/`.` or `<`/`>`).
+3. **A few bundled `.rle` patterns / a load menu.** Save/load exists; shipping a
+   couple of famous `.rle`s (gun, breeder) or a pick-list would make it discoverable.
 
 ### Tier 3 — perf, only if it actually bites
-5. **Encode sixel directly from the live-cell set.** Removes the residual O(pixels)
+4. **Encode sixel directly from the live-cell set.** Removes the residual O(pixels)
    encode cost at huge screen / 1px zoom (~1.7 ms/frame today). Only worth doing if
    big-screen encode ever becomes the bottleneck; the direct-render change already
    killed the O(viewport) hash-lookup cost that was the real problem.
@@ -229,6 +235,10 @@ marked DONE. When you pick one up, update this list.
 - **One world only (unbounded/sparse).** Don't reintroduce Finite/Toroidal, a
   `WorldType`, or Canvas mode — the product is the infinite sandbox. `Board` is a
   transient seed buffer, not the sim state.
+- **`terminal_char()` now returns the raw byte for every key** (set before the
+  switch in terminal.c), so text-entry modes (UI_FILE) can read 'q' etc. even
+  though it also maps to `KEY_QUIT`. In text entry, distinguish quit by the byte
+  (`0x03` = Ctrl-C) rather than by `KEY_QUIT`.
 - **Go through the engine seam.** main.c/history.c call `engine_*`, not `sparse_*`
   — keep it that way so a Hashlife backend can drop in behind `LifeEngine`. Rewind
   never reverse-computes (Life is irreversible): it recalls a snapshot or replays

@@ -4,10 +4,12 @@
 #include "config.h"
 #include "engine.h"
 #include "history.h"
+#include "rle.h"
 #include "settings.h"
 #include "sixel.h"
 #include "terminal.h"
 
+#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -71,8 +73,11 @@
 #define SPEED_MAX_DELAY_MS 2000
 #define SPEED_MIN_DELAY_MS 10  /* smallest non-zero delay before snapping to 0 */
 
+/* Longest pattern filename the file prompt accepts. */
+#define FILE_BUF_MAX 255
+
 /* Top-level interaction mode. */
-typedef enum { UI_NORMAL, UI_EDIT, UI_JUMP } UiMode;
+typedef enum { UI_NORMAL, UI_EDIT, UI_JUMP, UI_FILE } UiMode;
 
 /* Simulation sub-state, meaningful in UI_NORMAL. */
 typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
@@ -114,6 +119,12 @@ typedef struct {
     bool jump_editing;          /* field typed into since it got focus */
     bool jumping;               /* a chunked jump is in progress (progress UI) */
     long jump_target;           /* its destination (for the progress readout) */
+
+    /* File prompt (UI_FILE): type a path to save/load an RLE pattern. */
+    char file_buf[FILE_BUF_MAX + 1];
+    int file_len;
+    bool file_saving;           /* true = save, false = load */
+    char msg[320];              /* transient result of the last save/load */
 
     /* Left-drag panning. While the left button is held, the camera is recomputed
        from the anchor captured on press so the grabbed point stays under the
@@ -193,7 +204,7 @@ static void print_usage(const char *prog) {
     printf("~/.config/game-of-life/settings.json.\n\n");
     printf("Buttons: Start Pause Step Reset Edit Jump   (q quits from anywhere)\n");
     printf("Normal:  drag pan   wheel zoom   +/- speed   c center   f follow\n");
-    printf("         j jump   x clear   Tab select   Space/Enter activate   q quit\n");
+    printf("         j jump   x clear   s/l save/load RLE   Tab select   q quit\n");
     printf("Edit:    arrows move cursor   Space toggle cell   Tab/Esc leave\n");
     printf("Jump:    type a generation (forward or back)   Enter jump   Esc cancel\n");
 }
@@ -322,16 +333,20 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
     } else if (app->mode == UI_JUMP) {
         appendf(buf, cap, n, " JUMP   Go to generation: " ANSI_REVERSE "%ld" ANSI_RESET
                 "   (now: %ld)" EOL EOL, app->jump_field, app->gen);
+    } else if (app->mode == UI_FILE) {
+        appendf(buf, cap, n, " %s   File: " ANSI_REVERSE "%s " ANSI_RESET EOL EOL,
+                app->file_saving ? "SAVE" : "LOAD", app->file_buf);
     } else if (app->mode == UI_EDIT) {
         appendf(buf, cap, n,
                 " EDIT   Cursor: (%d,%d)   Live: %zu" EOL EOL,
                 app->cursor_x, app->cursor_y, engine_population(app->engine));
     } else {
         appendf(buf, cap, n,
-                " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Delay: %ldms   Follow: %s" EOL EOL,
+                " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Delay: %ldms   Follow: %s" EOL,
                 sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
                 engine_population(app->engine), app->infinite_cell_px,
                 app->delay_ms, app->follow ? "on" : "off");
+        appendf(buf, cap, n, "%s" EOL, app->msg[0] ? app->msg : "");
     }
 
     /* Button bar; selection is highlighted only in normal mode. */
@@ -355,12 +370,17 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
         appendf(buf, cap, n,
                 " Type a generation (forward or back)   Backspace delete   "
                 "Enter jump   Esc cancel" CLR_EOL);
+    } else if (app->mode == UI_FILE) {
+        appendf(buf, cap, n,
+                " Type a %s filename (.rle)   Backspace delete   Enter %s   Esc cancel" CLR_EOL,
+                app->file_saving ? "save" : "load",
+                app->file_saving ? "save" : "load");
     } else if (app->mode == UI_EDIT) {
         appendf(buf, cap, n,
                 " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
     } else {
         appendf(buf, cap, n,
-                " Drag pan   Wheel zoom   +/- speed   c center   f follow   j jump   x clear   Tab select   Space/Enter go   q quit" CLR_EOL);
+                " Drag pan  Wheel zoom  +/- speed  c center  f follow  j jump  x clear  s/l save/load  Tab select  Space/Enter go  q quit" CLR_EOL);
     }
 }
 
@@ -526,6 +546,89 @@ static void adjust_speed(App *app, int dir) {
     if (d < 0) d = 0;
     if (d > SPEED_MAX_DELAY_MS) d = SPEED_MAX_DELAY_MS;
     app->delay_ms = d;
+}
+
+/* Enter the file prompt to save or load an RLE pattern. */
+static void enter_file(App *app, bool saving) {
+    app->mode = UI_FILE;
+    app->file_saving = saving;
+    app->file_len = 0;
+    app->file_buf[0] = '\0';
+}
+
+/* Gather every live cell into a growable (x, y) array (for saving). */
+typedef struct {
+    int *xy;
+    size_t n, cap;
+    bool oom;
+} CellVec;
+
+static void gather_cb(int x, int y, void *ud) {
+    CellVec *v = (CellVec *)ud;
+    if (v->oom) return;
+    if (v->n == v->cap) {
+        size_t nc = v->cap ? v->cap * 2 : 256;
+        int *nx = realloc(v->xy, nc * 2 * sizeof(int));
+        if (nx == NULL) { v->oom = true; return; }
+        v->xy = nx;
+        v->cap = nc;
+    }
+    v->xy[2 * v->n] = x;
+    v->xy[2 * v->n + 1] = y;
+    v->n++;
+}
+
+/* Save the whole world to the RLE file named in file_buf. */
+static void do_save(App *app) {
+    CellVec v = {0};
+    engine_query(app->engine, INT_MIN, INT_MIN, INT_MAX, INT_MAX, gather_cb, &v);
+    if (v.oom) {
+        free(v.xy);
+        snprintf(app->msg, sizeof(app->msg), "Save failed: out of memory");
+        return;
+    }
+    char err[128] = {0};
+    bool ok = rle_save(app->file_buf, v.xy, v.n, err, sizeof(err));
+    free(v.xy);
+    if (ok) {
+        snprintf(app->msg, sizeof(app->msg), "Saved %zu cells to %s", v.n, app->file_buf);
+    } else {
+        snprintf(app->msg, sizeof(app->msg), "Save failed: %s", err);
+    }
+}
+
+/* Load an RLE pattern from file_buf, replacing the world and centring it in the
+   current view. */
+static void do_load(App *app) {
+    int *cells = NULL;
+    size_t count = 0;
+    char err[128] = {0};
+    if (!rle_load(app->file_buf, &cells, &count, err, sizeof(err))) {
+        snprintf(app->msg, sizeof(app->msg), "Load failed: %s", err);
+        return;
+    }
+    /* Pattern is top-left near (0,0); centre it on the current camera. */
+    int w = 0, h = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (cells[2 * i] + 1 > w) w = cells[2 * i] + 1;
+        if (cells[2 * i + 1] + 1 > h) h = cells[2 * i + 1] + 1;
+    }
+    const int ox = app->cam_x + app->view_w / 2 - w / 2;
+    const int oy = app->cam_y + app->view_h / 2 - h / 2;
+
+    engine_clear(app->engine);
+    for (size_t i = 0; i < count; i++) {
+        engine_set(app->engine, cells[2 * i] + ox, cells[2 * i + 1] + oy, true);
+    }
+    free(cells);
+
+    engine_snapshot_free(app->restart);
+    app->restart = engine_snapshot(app->engine);
+    history_clear(app->history);
+    app->gen = 0;
+    app->sim = SIM_STOPPED;
+    recenter_camera(app);
+    snprintf(app->msg, sizeof(app->msg), "Loaded %zu cells from %s", count, app->file_buf);
 }
 
 /* Enter the jump prompt (type a target generation). */
@@ -707,6 +810,9 @@ static void handle_normal(App *app, Key key) {
         return;
     }
 
+    /* Any real keypress dismisses a lingering save/load message. */
+    if (key != KEY_NONE) app->msg[0] = '\0';
+
     switch (key) {
         case KEY_NONE:
             if (app->sim == SIM_RUNNING) {
@@ -743,6 +849,10 @@ static void handle_normal(App *app, Key key) {
                     adjust_speed(app, +1);
                 } else if (c == '-' || c == '_') {
                     adjust_speed(app, -1);
+                } else if (c == 's' || c == 'S') {
+                    enter_file(app, true);
+                } else if (c == 'l' || c == 'L') {
+                    enter_file(app, false);
                 }
             }
             break;
@@ -831,11 +941,59 @@ static void handle_jump(App *app, Key key) {
     }
 }
 
+/* Type a filename, then save or load an RLE pattern. Printable characters are
+   appended (including 'q', recovered via terminal_char()); Ctrl-C still quits. */
+static void handle_file(App *app, Key key) {
+    switch (key) {
+        case KEY_BACKSPACE:
+            if (app->file_len > 0) app->file_buf[--app->file_len] = '\0';
+            break;
+        case KEY_SPACE:
+            if (app->file_len < FILE_BUF_MAX) {
+                app->file_buf[app->file_len++] = ' ';
+                app->file_buf[app->file_len] = '\0';
+            }
+            break;
+        case KEY_ENTER:
+            app->mode = UI_NORMAL;
+            if (app->file_len > 0) {
+                if (app->file_saving) do_save(app);
+                else do_load(app);
+            }
+            break;
+        case KEY_ESC:
+            app->mode = UI_NORMAL; /* cancel */
+            break;
+        case KEY_QUIT: {
+            /* 'q'/'Q' are literal filename characters here; only Ctrl-C quits. */
+            int c = terminal_char();
+            if (c == 0x03) {
+                app->running = false;
+            } else if (app->file_len < FILE_BUF_MAX) {
+                app->file_buf[app->file_len++] = (char)c;
+                app->file_buf[app->file_len] = '\0';
+            }
+            break;
+        }
+        case KEY_OTHER: {
+            int c = terminal_char();
+            if (c >= 0x20 && c < 0x7f && app->file_len < FILE_BUF_MAX) {
+                app->file_buf[app->file_len++] = (char)c;
+                app->file_buf[app->file_len] = '\0';
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 /* Dispatch a key to the handler for the current mode. */
 static void handle_key(App *app, Key key) {
     switch (app->mode) {
         case UI_EDIT: handle_edit(app, key); break;
         case UI_JUMP: handle_jump(app, key); break;
+        case UI_FILE: handle_file(app, key); break;
         default:      handle_normal(app, key); break;
     }
 }

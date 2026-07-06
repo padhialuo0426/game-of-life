@@ -145,6 +145,11 @@ Key terminal_read_key(int timeout_ms) {
         return KEY_NONE;
     }
 
+    /* Record the raw byte for every key, so terminal_char() can recover it even
+       for keys that map to a named Key (e.g. 'q' behind KEY_QUIT) — text-entry
+       modes need the literal character. */
+    g_last_char = (unsigned char)c;
+
     switch (c) {
         case '\t':   return KEY_TAB;
         case '\r':   /* fall through */
@@ -156,7 +161,7 @@ Key terminal_read_key(int timeout_ms) {
         case 'Q':
         case 0x03:   return KEY_QUIT; /* Ctrl-C */
         case 0x1b:   return decode_escape();
-        default:     g_last_char = (unsigned char)c; return KEY_OTHER;
+        default:     return KEY_OTHER;
     }
 }
 

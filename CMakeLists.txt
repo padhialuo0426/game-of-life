@@ -27,6 +27,7 @@ add_executable(game-of-life
     src/config.c
     src/engine.c
     src/history.c
+    src/rle.c
     src/settings.c
     src/sixel.c
     src/sparse.c
