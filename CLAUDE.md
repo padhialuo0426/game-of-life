@@ -74,6 +74,10 @@ so the installed `~/.local/bin` binary stays current for the user to test.
   terminal.c now records the raw byte for **every** key so filenames can contain
   'q' (only Ctrl-C quits in text entry). rle.c unit-tested (canonical glider parse,
   round-trip, empty); PTY-tested in-app (save→clear→load, q-in-filename).
+  `patterns/` now ships every pattern in **both** `.cells` (for `-f`/default) and
+  `.rle` (for in-app `l`). Note the split load paths: startup `-f`/default read
+  `.cells` via config.c; in-app `l` reads `.rle` via rle.c. Making either path
+  format-agnostic is an easy future cleanup if the split ever bites.
 - **(Fedora) Jump: rewind + fast-forward, with an engine seam for Hashlife.**
   New `LifeEngine`/`EngineSnapshot` abstraction (`engine.{c,h}`) and a bounded
   history ring (`history.{c,h}`). `j` / the **Jump** button opens a prompt: type

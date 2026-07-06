@@ -248,8 +248,9 @@ cp patterns/pulsar.cells ~/.config/game-of-life/default.cells
 
 ### Included patterns
 
-The `patterns/` directory contains classic Life patterns you can load with
-`-f patterns/<name>.cells`:
+The `patterns/` directory contains classic Life patterns. Load one at startup
+with `-f patterns/<name>.cells`, or from inside the app with the `l` key using
+the matching `.rle` file (each pattern is provided in both formats):
 
 | File | Type |
 | --- | --- |

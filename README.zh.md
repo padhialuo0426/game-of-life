@@ -222,7 +222,8 @@ cp patterns/pulsar.cells ~/.config/game-of-life/default.cells
 
 ### 内置图案
 
-`patterns/` 目录里有一批经典生命游戏图案，可用 `-f patterns/<名字>.cells` 加载：
+`patterns/` 目录里有一批经典生命游戏图案。可在启动时用 `-f patterns/<名字>.cells`
+加载，或在程序内按 `l` 键加载对应的 `.rle` 文件（每个图案都提供了两种格式）：
 
 | 文件 | 类型 |
 | --- | --- |
