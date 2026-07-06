@@ -36,9 +36,19 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Source layout
 
-- `src/sparse.{c,h}` — the world engine: open-addressing hash set of live cells
-  (SplitMix64 hash, backward-shift deletion). `sparse_step` tallies neighbours;
-  `sparse_query(x0,y0,x1,y1,fn)` iterates the live cells in a rectangle (render).
+- `src/engine.{c,h}` — **the engine seam.** Opaque `LifeEngine` + `EngineSnapshot`
+  wrapping the sparse backend today; this is the interface a future Hashlife
+  backend implements. The two "ENGINE SEAM" ops are `engine_advance(n)` (Hashlife
+  would leap in ~O(log n)) and `engine_snapshot`/`engine_restore` (Hashlife would
+  store a canonical quadtree node id). main.c/history.c talk only to `engine_*`.
+- `src/history.{c,h}` — bounded ring (HISTORY_CAP=1024) of `EngineSnapshot`s
+  tagged by generation, for instant rewind. Direct-mapped (`gen % cap`), with
+  branch-detection: recording a non-contiguous gen clears the ring (timeline
+  changed). `history_floor(gen)` finds the nearest replay base.
+- `src/sparse.{c,h}` — the current world engine behind `engine.c`: open-addressing
+  hash set of live cells (SplitMix64 hash, backward-shift deletion). `sparse_step`
+  tallies neighbours; `sparse_query(x0,y0,x1,y1,fn)` iterates the live cells in a
+  rectangle (render + snapshot).
 - `src/sixel.{c,h}` — sixel bitmap encoder. Incremental `SixelCanvas`
   (`new/set_alive/set_cursor/encode/free`) plotted straight from the live-cell set;
   `sixel_render_board` is a thin Board wrapper on top. Palette: dead/alive/grid/cursor.
@@ -54,6 +64,18 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Jump: rewind + fast-forward, with an engine seam for Hashlife.**
+  New `LifeEngine`/`EngineSnapshot` abstraction (`engine.{c,h}`) and a bounded
+  history ring (`history.{c,h}`). `j` / the **Jump** button opens a prompt: type
+  an absolute generation and leap there. Backward = restore the nearest retained
+  snapshot (instant) or replay from the gen-0 restart config; forward = advance in
+  interruptible JUMP_CHUNK=256 chunks (Esc/q aborts, progress shown, follow honored)
+  so a long jump never freezes the UI. Life is irreversible, so rewind never
+  computes a predecessor — it recalls or re-derives one. `sparse_initial` (a whole
+  world) became `restart` (an `EngineSnapshot`); Reset/edit-commit reset the ring.
+  Unit-tested (engine determinism, glider displacement, snapshot==recompute,
+  ring evict/floor/branch-clear); PTY-tested (fwd 40/2000, instant back 8, back 0).
+  Buttons: Start Pause Step Reset Edit **Jump** (6).
 - **(Fedora) Collapse to a pure infinite sandbox.** Removed the Finite and
   Toroidal world types, the `WorldType` enum, the dense stepping path, Canvas
   mode (the `BTN_CANVAS` button, `handle_canvas`/`canvas_apply`, resize/conversion
@@ -169,6 +191,8 @@ marked DONE. When you pick one up, update this list.
 - ~~Tier 1 · Recenter / follow~~ **DONE (2026-07-06)** — `c` centres, `f` follows.
 - ~~Tier 2 · Collapse to a pure infinite sandbox~~ **DONE (2026-07-06)** — Finite/
   Toroidal + Canvas removed; see changes list.
+- ~~Jump (rewind + fast-forward)~~ **DONE (2026-07-06)** — history ring + chunked
+  interruptible fast-forward, on a `LifeEngine` seam ready for Hashlife. See changes.
 - **Advice to the iTerm2 user (not code):** update iTerm2 to ≥ 3.7.0beta1 — the
   actual fix for the image-retention memory blow-up.
 
@@ -176,6 +200,12 @@ marked DONE. When you pick one up, update this list.
 1. **Runtime speed control.** `delay_ms` is currently fixed at launch (`-d` only).
    Add `+`/`-` (or `[`/`]`) to change it live, with the current speed on the status
    line. Small code; essential for actually watching evolution. **Recommended next.**
+2. **Hashlife backend.** The `engine.{c,h}` seam is in place: implement a hashed
+   -quadtree engine behind `LifeEngine` so `engine_advance` can leap over huge
+   generation counts (guns/breeders) that the sparse stepper handles only in
+   O(N²). `EngineSnapshot` would become a canonical node id (O(1) to keep, making
+   the history ring nearly free). Big, self-contained; do when far-forward Jump on
+   growing patterns starts to hurt.
 
 ### Tier 2 — nice to have
 2. **Large-pattern save/load (RLE).** Real sandbox persistence: load the community
@@ -199,6 +229,11 @@ marked DONE. When you pick one up, update this list.
 - **One world only (unbounded/sparse).** Don't reintroduce Finite/Toroidal, a
   `WorldType`, or Canvas mode — the product is the infinite sandbox. `Board` is a
   transient seed buffer, not the sim state.
+- **Go through the engine seam.** main.c/history.c call `engine_*`, not `sparse_*`
+  — keep it that way so a Hashlife backend can drop in behind `LifeEngine`. Rewind
+  never reverse-computes (Life is irreversible): it recalls a snapshot or replays
+  from gen 0. A jump forward MUST stay chunked+interruptible (growing patterns are
+  O(N²) in the sparse engine and would otherwise freeze the UI).
 - **Sixel is mandatory**: don't reintroduce a text renderer or assume a char grid.
 - **Alt screen**: on exit, do NOT clear the user's main screen/scrollback yourself
   — leaving the alt screen (`terminal_restore`) restores it. Don't reintroduce

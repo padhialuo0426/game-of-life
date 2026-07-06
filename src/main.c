@@ -2,9 +2,10 @@
 
 #include "board.h"
 #include "config.h"
+#include "engine.h"
+#include "history.h"
 #include "settings.h"
 #include "sixel.h"
-#include "sparse.h"
 #include "terminal.h"
 
 #include <signal.h>
@@ -57,8 +58,16 @@
 #define INFINITE_CELL_MAX SIXEL_CELL_MAX
 #define ZOOM_STEP 2 /* pixels per wheel notch */
 
+/* Jump / rewind. The history ring keeps the last HISTORY_CAP generations so a
+   recent rewind is instant; a jump forward (or a deep rewind that must replay
+   from generation 0) advances JUMP_CHUNK generations at a time, checking for a
+   cancel key between chunks so a long jump never freezes the UI. */
+#define HISTORY_CAP 1024
+#define JUMP_CHUNK 256
+#define JUMP_FIELD_MAX 1000000000L /* cap the typed target to keep it sane */
+
 /* Top-level interaction mode. */
-typedef enum { UI_NORMAL, UI_EDIT } UiMode;
+typedef enum { UI_NORMAL, UI_EDIT, UI_JUMP } UiMode;
 
 /* Simulation sub-state, meaningful in UI_NORMAL. */
 typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
@@ -66,12 +75,12 @@ typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
 /* Bottom button bar. Order matters: it is the left-to-right layout. There is no
    Quit button — 'q' (or Ctrl-C) quits from any screen. */
 typedef enum {
-    BTN_START, BTN_PAUSE, BTN_STEP, BTN_RESET, BTN_EDIT,
+    BTN_START, BTN_PAUSE, BTN_STEP, BTN_RESET, BTN_EDIT, BTN_JUMP,
     BTN_COUNT
 } Button;
 
 static const char *const BUTTON_LABELS[BTN_COUNT] = {
-    " Start ", " Pause ", " Step ", " Reset ", " Edit "};
+    " Start ", " Pause ", " Step ", " Reset ", " Edit ", " Jump "};
 
 typedef struct {
     UiMode mode;
@@ -85,14 +94,21 @@ typedef struct {
     uint64_t sx_last_hash;      /* hash of the last emitted image bytes */
     bool sx_drawn;              /* an image has been emitted at least once */
 
-    /* The unbounded world: a sparse hash-set of live cells with a pannable,
-       zoomable viewport rendered straight from the live-cell set. */
-    SparseWorld *sparse;        /* live cells */
-    SparseWorld *sparse_initial;/* config restored by Reset */
+    /* The unbounded world: a Life engine (sparse today) with a pannable,
+       zoomable viewport rendered straight from its live cells. */
+    LifeEngine *engine;         /* the world */
+    EngineSnapshot *restart;    /* generation-0 config restored by Reset */
+    History *history;           /* recent generations, for instant rewind */
     int cam_x, cam_y;           /* viewport top-left in world coordinates */
     int view_w, view_h;         /* current viewport size in cells */
     int infinite_cell_px;       /* pixels per cell (mouse-wheel zoom level) */
     bool follow;                /* auto-recentre the camera on the pattern */
+
+    /* Jump (UI_JUMP): type a target generation to leap to (forward or back). */
+    long jump_field;            /* the number being typed */
+    bool jump_editing;          /* field typed into since it got focus */
+    bool jumping;               /* a chunked jump is in progress (progress UI) */
+    long jump_target;           /* its destination (for the progress readout) */
 
     /* Left-drag panning. While the left button is held, the camera is recomputed
        from the anchor captured on press so the grabbed point stays under the
@@ -170,10 +186,11 @@ static void print_usage(const char *prog) {
     printf("      --help        show this help and exit\n\n");
     printf("Settings such as the seed-region size are remembered between runs in\n");
     printf("~/.config/game-of-life/settings.json.\n\n");
-    printf("Buttons: Start Pause Step Reset Edit   (q quits from anywhere)\n");
-    printf("Normal:  drag pan   wheel zoom   c center   f follow   Tab select\n");
-    printf("         Space/Enter activate   q quit\n");
+    printf("Buttons: Start Pause Step Reset Edit Jump   (q quits from anywhere)\n");
+    printf("Normal:  drag pan   wheel zoom   c center   f follow   j jump\n");
+    printf("         Tab select   Space/Enter activate   q quit\n");
     printf("Edit:    arrows move cursor   Space toggle cell   Tab/Esc leave\n");
+    printf("Jump:    type a generation (forward or back)   Enter jump   Esc cancel\n");
 }
 
 static bool parse_long(int argc, char **argv, int *i, long *out) {
@@ -293,15 +310,22 @@ static void plot_cell_cb(int x, int y, void *ud) {
 /* Append the controls block below the sixel image: status line, a blank line,
    the button bar, a blank line, and the hint line. */
 static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
-    if (app->mode == UI_EDIT) {
+    if (app->jumping) {
+        appendf(buf, cap, n,
+                " JUMPING   Gen: %ld / %ld   Live: %zu   (Esc to stop)" EOL EOL,
+                app->gen, app->jump_target, engine_population(app->engine));
+    } else if (app->mode == UI_JUMP) {
+        appendf(buf, cap, n, " JUMP   Go to generation: " ANSI_REVERSE "%ld" ANSI_RESET
+                "   (now: %ld)" EOL EOL, app->jump_field, app->gen);
+    } else if (app->mode == UI_EDIT) {
         appendf(buf, cap, n,
                 " EDIT   Cursor: (%d,%d)   Live: %zu" EOL EOL,
-                app->cursor_x, app->cursor_y, sparse_count(app->sparse));
+                app->cursor_x, app->cursor_y, engine_population(app->engine));
     } else {
         appendf(buf, cap, n,
                 " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Follow: %s" EOL EOL,
                 sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
-                sparse_count(app->sparse), app->infinite_cell_px,
+                engine_population(app->engine), app->infinite_cell_px,
                 app->follow ? "on" : "off");
     }
 
@@ -319,12 +343,19 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
 
     /* The hint is the last line of the frame, so it ends with CLR_EOL (no
        newline) to avoid scrolling the screen on the bottom row. */
-    if (app->mode == UI_EDIT) {
+    if (app->jumping) {
+        appendf(buf, cap, n, " Jumping to generation %ld…   Esc to stop" CLR_EOL,
+                app->jump_target);
+    } else if (app->mode == UI_JUMP) {
+        appendf(buf, cap, n,
+                " Type a generation (forward or back)   Backspace delete   "
+                "Enter jump   Esc cancel" CLR_EOL);
+    } else if (app->mode == UI_EDIT) {
         appendf(buf, cap, n,
                 " Arrows move cursor   Space/Enter toggle   Tab/Esc leave   q quit" CLR_EOL);
     } else {
         appendf(buf, cap, n,
-                " Drag pan   Wheel zoom   c center   f follow   Tab select   Space/Enter activate   q quit" CLR_EOL);
+                " Drag pan   Wheel zoom   c center   f follow   j jump   Tab select   Space/Enter activate   q quit" CLR_EOL);
     }
 }
 
@@ -403,7 +434,7 @@ static bool render(App *app) {
     if (canvas == NULL) return false;
 
     PlotCtx ctx = {canvas, app->cam_x, app->cam_y};
-    sparse_query(app->sparse, app->cam_x, app->cam_y,
+    engine_query(app->engine, app->cam_x, app->cam_y,
                  app->cam_x + vw, app->cam_y + vh, plot_cell_cb, &ctx);
 
     if (app->mode == UI_EDIT && app->blink_on) {
@@ -424,21 +455,26 @@ static bool render(App *app) {
 /* World helpers                                                      */
 /* ------------------------------------------------------------------ */
 
+/* Advance one generation and record it so the step can be rewound. */
 static void step_once(App *app) {
-    sparse_step(app->sparse);
+    engine_advance(app->engine, 1);
     app->gen++;
+    history_record(app->history, app->gen, engine_snapshot(app->engine));
 }
 
 /* Seed the world from a dense board (world coordinates match board coordinates),
    snapshot it as the restart config, and centre the viewport on it. */
 static void seed_from_board(App *app, const Board *b) {
-    sparse_clear(app->sparse);
+    engine_clear(app->engine);
     for (int y = 0; y < b->height; y++) {
         for (int x = 0; x < b->width; x++) {
-            if (board_get(b, x, y)) sparse_set(app->sparse, x, y, true);
+            if (board_get(b, x, y)) engine_set(app->engine, x, y, true);
         }
     }
-    sparse_copy(app->sparse_initial, app->sparse);
+    engine_snapshot_free(app->restart);
+    app->restart = engine_snapshot(app->engine);
+    history_clear(app->history);
+    app->gen = 0;
 
     int vw, vh;
     infinite_viewport(app, &vw, &vh);
@@ -453,11 +489,73 @@ static void seed_from_board(App *app, const Board *b) {
    except across a zoom/resize that has not been drawn yet. */
 static void recenter_camera(App *app) {
     int minx, miny, maxx, maxy;
-    if (!sparse_bounds(app->sparse, &minx, &miny, &maxx, &maxy)) return;
+    if (!engine_bounds(app->engine, &minx, &miny, &maxx, &maxy)) return;
     const int mid_x = minx + (maxx - minx) / 2;
     const int mid_y = miny + (maxy - miny) / 2;
     app->cam_x = mid_x - app->view_w / 2;
     app->cam_y = mid_y - app->view_h / 2;
+}
+
+/* Enter the jump prompt (type a target generation). */
+static void enter_jump(App *app) {
+    app->mode = UI_JUMP;
+    app->jump_field = app->gen;
+    app->jump_editing = false;
+}
+
+/* Advance from the current generation to `target` (> current) in interruptible
+   chunks, so a long fast-forward neither freezes the UI nor floods it. Records
+   the trailing HISTORY_CAP generations so a later small rewind stays instant.
+   Esc or q stops early, leaving the world at whatever generation it reached. */
+static void run_forward(App *app, long target) {
+    app->jumping = true;
+    app->jump_target = target;
+    while (app->gen < target && app->running) {
+        long remaining = target - app->gen;
+        long n = remaining < JUMP_CHUNK ? remaining : JUMP_CHUNK;
+        for (long i = 0; i < n; i++) {
+            engine_advance(app->engine, 1);
+            app->gen++;
+            if (target - app->gen < (long)HISTORY_CAP) {
+                history_record(app->history, app->gen, engine_snapshot(app->engine));
+            }
+        }
+        if (app->follow) recenter_camera(app);
+        if (app->gen < target) {
+            render(app); /* show the fast-forward animation + progress line */
+            Key k = terminal_read_key(0);
+            if (k == KEY_ESC || k == KEY_QUIT) break; /* abort the jump */
+        }
+    }
+    app->jumping = false;
+}
+
+/* Jump to an absolute generation, forward or backward. A generation still in the
+   history ring is restored instantly; otherwise restore the nearest earlier base
+   (a ring snapshot, or the generation-0 restart config) and replay forward from
+   there. Backward is possible only because Life is irreversible — we never
+   compute a predecessor, we recall or re-derive it. */
+static void jump_to(App *app, long target) {
+    if (target < 0) target = 0;
+    if (target == app->gen) return;
+
+    /* Best base <= target with the fewest replayed steps: the current state (if
+       not past target), the nearest retained snapshot, else generation 0. */
+    long base_gen = 0;              /* the restart config is generation 0 */
+    const EngineSnapshot *base = app->restart;
+    bool from_current = false;
+
+    long hg = 0;
+    const EngineSnapshot *hs = history_floor(app->history, target, &hg);
+    if (hs != NULL && hg >= base_gen) { base = hs; base_gen = hg; }
+    if (app->gen <= target && app->gen >= base_gen) { from_current = true; base_gen = app->gen; }
+
+    if (!from_current) {
+        engine_restore(app->engine, base);
+        app->gen = base_gen;
+    }
+    if (app->gen != target) run_forward(app, target);
+    app->sim = SIM_PAUSED;
 }
 
 /* ------------------------------------------------------------------ */
@@ -480,8 +578,9 @@ static void activate_button(App *app) {
         case BTN_RESET:
             /* Reload the initial configuration (generation 0). */
             app->sim = SIM_STOPPED;
-            sparse_copy(app->sparse, app->sparse_initial);
+            engine_restore(app->engine, app->restart);
             app->gen = 0;
+            history_clear(app->history);
             break;
         case BTN_EDIT:
             app->mode = UI_EDIT;
@@ -490,6 +589,9 @@ static void activate_button(App *app) {
             /* Start the cursor at the centre of the current view. */
             app->cursor_x = app->cam_x + app->view_w / 2;
             app->cursor_y = app->cam_y + app->view_h / 2;
+            break;
+        case BTN_JUMP:
+            enter_jump(app);
             break;
     }
 }
@@ -601,6 +703,8 @@ static void handle_normal(App *app, Key key) {
                 } else if (c == 'f' || c == 'F') {
                     app->follow = !app->follow;
                     if (app->follow) recenter_camera(app);
+                } else if (c == 'j' || c == 'J') {
+                    enter_jump(app);
                 }
             }
             break;
@@ -630,14 +734,17 @@ static void handle_edit(App *app, Key key) {
         case KEY_DOWN:  app->cursor_y++; break;
         case KEY_SPACE:
         case KEY_ENTER: {
-            bool alive = sparse_get(app->sparse, app->cursor_x, app->cursor_y);
-            sparse_set(app->sparse, app->cursor_x, app->cursor_y, !alive);
+            bool alive = engine_get(app->engine, app->cursor_x, app->cursor_y);
+            engine_set(app->engine, app->cursor_x, app->cursor_y, !alive);
             break;
         }
         case KEY_TAB:
         case KEY_ESC:
-            /* Leave edit mode; the edited world becomes the new restart config. */
-            sparse_copy(app->sparse_initial, app->sparse);
+            /* Leave edit mode; the edited world becomes the new restart config,
+               and it starts a fresh timeline. */
+            engine_snapshot_free(app->restart);
+            app->restart = engine_snapshot(app->engine);
+            history_clear(app->history);
             app->gen = 0;
             app->sim = SIM_STOPPED;
             app->mode = UI_NORMAL;
@@ -651,12 +758,47 @@ static void handle_edit(App *app, Key key) {
     follow_cursor(app);
 }
 
+/* Type a target generation, then leap there (forward or backward). */
+static void handle_jump(App *app, Key key) {
+    switch (key) {
+        case KEY_BACKSPACE:
+            app->jump_field /= 10;
+            app->jump_editing = true;
+            break;
+        case KEY_OTHER: {
+            const int c = terminal_char();
+            if (c >= '0' && c <= '9') {
+                long d = c - '0';
+                /* First digit after focusing replaces the shown value. */
+                long v = app->jump_editing ? app->jump_field * 10 + d : d;
+                app->jump_field = v > JUMP_FIELD_MAX ? JUMP_FIELD_MAX : v;
+                app->jump_editing = true;
+            }
+            break;
+        }
+        case KEY_ENTER: {
+            long target = app->jump_field;
+            app->mode = UI_NORMAL;
+            jump_to(app, target);
+            break;
+        }
+        case KEY_ESC:
+            app->mode = UI_NORMAL; /* cancel */
+            break;
+        case KEY_QUIT:
+            app->running = false;
+            break;
+        default:
+            break;
+    }
+}
+
 /* Dispatch a key to the handler for the current mode. */
 static void handle_key(App *app, Key key) {
-    if (app->mode == UI_EDIT) {
-        handle_edit(app, key);
-    } else {
-        handle_normal(app, key);
+    switch (app->mode) {
+        case UI_EDIT: handle_edit(app, key); break;
+        case UI_JUMP: handle_jump(app, key); break;
+        default:      handle_normal(app, key); break;
     }
 }
 
@@ -765,10 +907,11 @@ int main(int argc, char **argv) {
     app.view_h = opt.height;
     app.infinite_cell_px = INFINITE_CELL_PX;
 
-    app.sparse = sparse_new();
-    app.sparse_initial = sparse_new();
-    if (app.sparse == NULL || app.sparse_initial == NULL) {
-        fprintf(stderr, "Failed to allocate sparse world\n");
+    app.engine = engine_new();
+    app.history = history_new(HISTORY_CAP);
+    app.restart = NULL;
+    if (app.engine == NULL || app.history == NULL) {
+        fprintf(stderr, "Failed to allocate world engine\n");
         return 1;
     }
 
@@ -782,19 +925,19 @@ int main(int argc, char **argv) {
     sa_winch.sa_handler = on_winch;
     sigaction(SIGWINCH, &sa_winch, NULL);
 
-    /* Lay the initial pattern out in a dense seed board, hand it to the sparse
-       world, then discard the board — the world is unbounded from here on. */
+    /* Lay the initial pattern out in a dense seed board, hand it to the world,
+       then discard the board — the world is unbounded from here on. */
     Board initial;
     if (!board_init(&initial, opt.width, opt.height)) {
         fprintf(stderr, "Failed to allocate board\n");
-        sparse_free(app.sparse);
-        sparse_free(app.sparse_initial);
+        engine_free(app.engine);
+        history_free(app.history);
         return 1;
     }
     if (!build_initial(&initial, &opt)) {
         board_free(&initial);
-        sparse_free(app.sparse);
-        sparse_free(app.sparse_initial);
+        engine_free(app.engine);
+        history_free(app.history);
         return 1;
     }
     seed_from_board(&app, &initial);
@@ -858,7 +1001,8 @@ int main(int argc, char **argv) {
     fflush(stdout);
     terminal_restore();
 
-    sparse_free(app.sparse);
-    sparse_free(app.sparse_initial);
+    engine_free(app.engine);
+    engine_snapshot_free(app.restart);
+    history_free(app.history);
     return 0;
 }

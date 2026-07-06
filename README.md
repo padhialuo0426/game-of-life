@@ -69,8 +69,8 @@ A sixel-capable interactive terminal is required (see [Requirements](#conways-ga
 
 ## Controls
 
-The bar below the image has five buttons:
-**Start / Pause / Step / Reset / Edit**. There is no Quit button — `q`
+The bar below the image has six buttons:
+**Start / Pause / Step / Reset / Edit / Jump**. There is no Quit button — `q`
 (or `Ctrl-C`) quits from any screen.
 
 The board is drawn as a sixel bitmap: each cell is a square block of pixels whose
@@ -84,6 +84,7 @@ size is the current zoom level.
 | **mouse wheel** | zoom in / out, anchored on the cursor |
 | `c` | recentre the view on the pattern |
 | `f` | toggle follow mode (auto-recentre every generation) |
+| `j` | jump to a generation (see below) |
 | `Tab` or `Right` | move selection to the next button |
 | `Left` | move selection to the previous button |
 | `Space` or `Enter` | activate the selected button |
@@ -95,6 +96,7 @@ size is the current zoom level.
   paused/reset state, so you can watch the simulation frame by frame.
 - **Reset** — reload the initial configuration (generation 0).
 - **Edit** — enter edit mode (see below).
+- **Jump** — jump to any generation, forward or back (see below).
 
 The status line shows the state, generation, camera position `Cam: (x,y)`, the
 live-cell count, the current zoom (`Zoom: Npx`, pixels per cell), and whether
@@ -128,6 +130,21 @@ keys and the view follows it.
 
 On leaving, the edited world becomes the new restart configuration, so **Reset**
 returns to what you drew.
+
+### Jump (rewind & fast-forward)
+
+Press **`j`** (or the **Jump** button), type a target **generation**, and press
+`Enter` to leap there — forward or backward. `Esc` cancels the prompt.
+
+- **Backward** works because recent generations are kept in a history ring, so a
+  rewind to a nearby generation is instant. A rewind further back than the ring
+  reaches replays from generation 0 (Conway's Life is irreversible — a previous
+  state can't be computed, only recalled or re-derived).
+- **Forward** fast-forwards by actually running the simulation, in small chunks
+  so the interface never freezes on a long jump; the progress is shown and you
+  can press `Esc` to stop early. Very long jumps on patterns whose population
+  grows without bound (glider guns, breeders) get slow and memory-hungry — that
+  is inherent to the current engine, which is why the jump is interruptible.
 
 ### Sixel rendering
 
