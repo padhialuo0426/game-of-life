@@ -56,9 +56,14 @@
    render around this size; the mouse wheel changes it to zoom (smaller = more
    cells visible). INFINITE_CELL_PX is the default. */
 #define INFINITE_CELL_PX 10
-#define INFINITE_CELL_MIN 1  /* 1 device pixel per cell — the real-pixel floor */
+#define INFINITE_CELL_MIN 1  /* 1 device pixel per cell — the chunky-zoom floor */
 #define INFINITE_CELL_MAX SIXEL_CELL_MAX
 #define ZOOM_STEP 2 /* pixels per wheel notch */
+/* Sub-pixel zoom: once at 1px/cell, further zoom-out packs cells_per_px world
+   cells into each screen pixel (OR-downsampled) so huge patterns fit whole. This
+   caps how far out you can go — 256 cells/px lets a viewport span ~256x the
+   screen's pixel width. */
+#define CELLS_PER_PX_MAX 256
 
 /* Jump / rewind. The history ring keeps the last HISTORY_CAP generations so a
    recent rewind is instant; a jump forward (or a deep rewind that must replay
@@ -111,7 +116,13 @@ typedef struct {
     History *history;           /* recent generations, for instant rewind */
     int cam_x, cam_y;           /* viewport top-left in world coordinates */
     int view_w, view_h;         /* current viewport size in cells */
-    int infinite_cell_px;       /* pixels per cell (mouse-wheel zoom level) */
+    int infinite_cell_px;       /* screen pixels per world cell when zoomed in
+                                   (>=1); the chunky-zoom level */
+    int cells_per_px;           /* world cells per screen pixel when zoomed out
+                                   (>=1); the sub-pixel-zoom level. Exactly one of
+                                   infinite_cell_px / cells_per_px is >1 at a time.
+                                   When >1, each screen pixel is lit if ANY cell in
+                                   its cells_per_px x cells_per_px block is alive. */
     bool follow;                /* auto-recentre the camera on the pattern */
 
     /* Jump (UI_JUMP): type a target generation to leap to (forward or back). */
@@ -284,25 +295,40 @@ static void appendf(char *buf, size_t cap, size_t *n, const char *fmt, ...) {
     }
 }
 
-/* Size of the viewport in cells, chosen to fill the terminal at the current zoom
-   (you pan to see beyond it). Mirrors the reservations made by the renderer so
-   the image plus controls fit without scrolling. */
+/* Convert a length in screen pixels to a length in world cells at the current
+   zoom. Scale is infinite_cell_px screen-pixels per world cell (chunky) or
+   cells_per_px world cells per screen-pixel (sub-pixel); exactly one is >1, so
+   this is spx * cells_per_px / infinite_cell_px. */
+static int screen_px_to_world(const App *app, int spx) {
+    return spx * app->cells_per_px / app->infinite_cell_px;
+}
+
+/* Human-readable zoom for the status line: "Npx" when chunky (N screen pixels per
+   cell), or "1px=Nc" when zoomed out sub-pixel (one screen pixel covers N cells). */
+static void zoom_label(const App *app, char *buf, size_t cap) {
+    if (app->cells_per_px > 1) {
+        snprintf(buf, cap, "1px=%dc", app->cells_per_px);
+    } else {
+        snprintf(buf, cap, "%dpx", app->infinite_cell_px);
+    }
+}
+
+/* Size of the viewport in world cells, chosen to fill the terminal at the current
+   zoom (you pan to see beyond it). Mirrors the reservations made by the renderer
+   so the image plus controls fit without scrolling. At sub-pixel zoom the
+   viewport spans many more cells than the display has pixels. */
 static void infinite_viewport(const App *app, int *vw, int *vh) {
-    const int px = app->infinite_cell_px;
     int cols, rows, xpx, ypx;
     if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
         int cch = ypx / rows, ccw = xpx / cols;
         if (cch > 0 && ccw > 0) {
             int avail_w = xpx - ccw;
             int avail_h = ypx - SIXEL_UI_ROWS * cch;
-            /* One cell per pixel is the finest the display can show, so the
-               viewport cap is the terminal's own detected pixel size: vw fills
-               the width at any zoom on any display (Retina, 4K, 8K, …) with no
-               fixed limit. avail_w/avail_h come from the ioctl ws_xpixel/ypixel
-               (u16-bounded); an over-large image simply fails to allocate and the
-               frame is skipped rather than capping zoom. */
-            *vw = clamp_dim(avail_w / px, MIN_DIM, avail_w);
-            *vh = clamp_dim(avail_h / px, MIN_DIM, avail_h);
+            /* World cells spanning the drawable pixel area. avail_w/avail_h come
+               from the ioctl ws_xpixel/ypixel (u16-bounded); with cells_per_px
+               capped at CELLS_PER_PX_MAX this stays well within int. */
+            *vw = clamp_dim(screen_px_to_world(app, avail_w), MIN_DIM, 1 << 22);
+            *vh = clamp_dim(screen_px_to_world(app, avail_h), MIN_DIM, 1 << 22);
             return;
         }
     }
@@ -316,11 +342,17 @@ static void infinite_viewport(const App *app, int *vw, int *vh) {
 typedef struct {
     SixelCanvas *canvas;
     int cam_x, cam_y;
+    int cpp;                /* cells_per_px: world cells mapped to one canvas cell */
 } PlotCtx;
 
 static void plot_cell_cb(int x, int y, void *ud) {
     PlotCtx *p = (PlotCtx *)ud;
-    sixel_canvas_set_alive(p->canvas, x - p->cam_x, y - p->cam_y);
+    /* At sub-pixel zoom (cpp > 1) a cpp x cpp block of world cells collapses onto
+       one canvas cell; set_alive is idempotent, so the pixel lights if any cell
+       in the block is alive (OR-downsampling). x,y are inside [cam, cam+vw), so
+       the subtraction is non-negative and the division needs no flooring fix. */
+    sixel_canvas_set_alive(p->canvas, (x - p->cam_x) / p->cpp,
+                           (y - p->cam_y) / p->cpp);
 }
 
 /* Append the controls block below the sixel image: status line, a blank line,
@@ -341,10 +373,12 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n) {
                 " EDIT   Cursor: (%d,%d)   Live: %zu" EOL EOL,
                 app->cursor_x, app->cursor_y, engine_population(app->engine));
     } else {
+        char zbuf[16];
+        zoom_label(app, zbuf, sizeof(zbuf));
         appendf(buf, cap, n,
-                " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %dpx   Delay: %ldms   Follow: %s" EOL,
+                " State: %s   Gen: %ld   Cam: (%d,%d)   Live: %zu   Zoom: %s   Delay: %ldms   Follow: %s" EOL,
                 sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
-                engine_population(app->engine), app->infinite_cell_px,
+                engine_population(app->engine), zbuf,
                 app->delay_ms, app->follow ? "on" : "off");
         appendf(buf, cap, n, "%s" EOL, app->msg[0] ? app->msg : "");
     }
@@ -454,17 +488,22 @@ static bool render(App *app) {
     app->view_h = vh;
 
     const int cell = app->infinite_cell_px < 1 ? 1 : app->infinite_cell_px;
+    const int cpp = app->cells_per_px < 1 ? 1 : app->cells_per_px;
 
-    SixelCanvas *canvas = sixel_canvas_new(vw, vh, cell);
+    /* The canvas is measured in screen pixels: vw world cells collapse to
+       vw/cpp canvas cells (each `cell` px). One of cell/cpp is always 1. */
+    const int ccols = (vw + cpp - 1) / cpp;
+    const int crows = (vh + cpp - 1) / cpp;
+    SixelCanvas *canvas = sixel_canvas_new(ccols, crows, cell);
     if (canvas == NULL) return false;
 
-    PlotCtx ctx = {canvas, app->cam_x, app->cam_y};
+    PlotCtx ctx = {canvas, app->cam_x, app->cam_y, cpp};
     engine_query(app->engine, app->cam_x, app->cam_y,
                  app->cam_x + vw, app->cam_y + vh, plot_cell_cb, &ctx);
 
     if (app->mode == UI_EDIT && app->blink_on) {
-        sixel_canvas_set_cursor(canvas, app->cursor_x - app->cam_x,
-                                app->cursor_y - app->cam_y);
+        sixel_canvas_set_cursor(canvas, (app->cursor_x - app->cam_x) / cpp,
+                                (app->cursor_y - app->cam_y) / cpp);
     }
 
     size_t img_len = 0;
@@ -472,7 +511,7 @@ static bool render(App *app) {
     sixel_canvas_free(canvas);
     if (img == NULL) return false;
 
-    emit_frame(app, img, img_len, vw * cell, vh * cell, cch);
+    emit_frame(app, img, img_len, ccols * cell, crows * cell, cch);
     return true;
 }
 
@@ -490,10 +529,12 @@ static void step_once(App *app) {
 /* Choose a zoom so a pattern spanning w x h cells fits the terminal's drawable
    pixel area, and centre the camera on world point (cx, cy). Only ever zooms
    *out* from the default (INFINITE_CELL_PX): a small pattern keeps the default
-   chunky zoom, while a big one is zoomed out — down to the 1px floor — so the
-   whole thing is visible on load instead of showing a fragment. Falls back to
-   the current zoom if the terminal pixel size is unavailable. */
+   chunky zoom; a big one first drops to 1px/cell, then to sub-pixel zoom
+   (cells_per_px > 1) so even a pattern much wider than the screen fits whole.
+   Falls back to the default zoom if the terminal pixel size is unavailable. */
 static void fit_view_to(App *app, int cx, int cy, int w, int h) {
+    app->infinite_cell_px = INFINITE_CELL_PX;
+    app->cells_per_px = 1;
     int cols, rows, xpx, ypx;
     if (w > 0 && h > 0 &&
         terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
@@ -502,10 +543,23 @@ static void fit_view_to(App *app, int cx, int cy, int w, int h) {
             int avail_w = xpx - ccw;
             int avail_h = ypx - SIXEL_UI_ROWS * cch;
             int fx = avail_w / w, fy = avail_h / h;
-            int px = fx < fy ? fx : fy;
-            if (px > INFINITE_CELL_PX) px = INFINITE_CELL_PX; /* never zoom in */
-            if (px < INFINITE_CELL_MIN) px = INFINITE_CELL_MIN;
-            app->infinite_cell_px = px;
+            int px = fx < fy ? fx : fy; /* screen px per cell that would fit */
+            if (px >= 1) {
+                /* Fits at >=1px/cell: chunky zoom, never past the default. */
+                app->infinite_cell_px = px > INFINITE_CELL_PX ? INFINITE_CELL_PX : px;
+                app->cells_per_px = 1;
+            } else {
+                /* Too big for 1px/cell: pack ceil(cells/pixel) cells into each
+                   screen pixel so the whole bbox fits (capped at the zoom-out
+                   floor — a truly enormous pattern still spills and is panned). */
+                int nx = (w + avail_w - 1) / avail_w;
+                int ny = (h + avail_h - 1) / avail_h;
+                int cpp = nx > ny ? nx : ny;
+                if (cpp < 1) cpp = 1;
+                if (cpp > CELLS_PER_PX_MAX) cpp = CELLS_PER_PX_MAX;
+                app->infinite_cell_px = 1;
+                app->cells_per_px = cpp;
+            }
         }
     }
     int vw, vh;
@@ -633,15 +687,18 @@ static void do_save(App *app) {
     }
 }
 
-/* Load an RLE pattern from file_buf, replacing the world, then centre and
-   zoom-to-fit the pattern in the view. */
-static void do_load(App *app) {
+/* Core RLE loader shared by startup `-f` and the in-app `l`: parse `path`
+   straight into the sparse engine (no dense board, so the only limit is the live
+   cell count — a pattern with a huge but sparse bounding box loads fine), make it
+   the restart config, reset generation/history, and centre + zoom-to-fit. On
+   success writes the cell count to *out_count. Returns false (fills errbuf) on a
+   parse/read error. */
+static bool load_rle_file(App *app, const char *path, size_t *out_count,
+                          char *errbuf, size_t errbuf_size) {
     int *cells = NULL;
     size_t count = 0;
-    char err[128] = {0};
-    if (!rle_load(app->file_buf, &cells, &count, err, sizeof(err))) {
-        snprintf(app->msg, sizeof(app->msg), "Load failed: %s", err);
-        return;
+    if (!rle_load(path, &cells, &count, errbuf, errbuf_size)) {
+        return false;
     }
     /* Pattern is top-left near (0,0); place it at its own coordinates. */
     int w = 0, h = 0;
@@ -661,6 +718,19 @@ static void do_load(App *app) {
     app->gen = 0;
     app->sim = SIM_STOPPED;
     fit_view_to(app, w / 2, h / 2, w, h);
+    if (out_count) *out_count = count;
+    return true;
+}
+
+/* Load an RLE pattern named by the in-app file prompt, reporting the result on
+   the status line. */
+static void do_load(App *app) {
+    size_t count = 0;
+    char err[128] = {0};
+    if (!load_rle_file(app, app->file_buf, &count, err, sizeof(err))) {
+        snprintf(app->msg, sizeof(app->msg), "Load failed: %s", err);
+        return;
+    }
     snprintf(app->msg, sizeof(app->msg), "Loaded %zu cells from %s", count, app->file_buf);
 }
 
@@ -774,8 +844,8 @@ static void screen_delta_to_world(const App *app, int dcol, int drow,
     if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
         int ccw = xpx / cols, cch = ypx / rows;
         if (ccw > 0 && cch > 0) {
-            *wdx = (dcol * ccw) / app->infinite_cell_px;
-            *wdy = (drow * cch) / app->infinite_cell_px;
+            *wdx = screen_px_to_world(app, dcol * ccw);
+            *wdy = screen_px_to_world(app, drow * cch);
             return;
         }
     }
@@ -783,30 +853,58 @@ static void screen_delta_to_world(const App *app, int dcol, int drow,
     *wdy = drow;
 }
 
-/* Mouse-wheel zoom, keeping the world point under the cursor fixed so zoom feels
-   centred there. dir = +1 zooms in (larger cells), -1 zooms out. mx,my are the
-   cursor's character-cell position. */
-static void zoom_infinite(App *app, int dir, int mx, int my) {
-    int old_px = app->infinite_cell_px;
-    int new_px = clamp_dim(old_px + dir * ZOOM_STEP,
-                           INFINITE_CELL_MIN, INFINITE_CELL_MAX);
-    if (new_px == old_px) return;
-
-    int cols, rows, xpx, ypx;
-    if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
-        int ccw = xpx / cols, cch = ypx / rows;
-        if (ccw > 0 && cch > 0) {
-            /* World cell currently under the cursor; keep it there afterwards. */
-            int px_x = mx * ccw, px_y = my * cch;
-            int world_x = app->cam_x + px_x / old_px;
-            int world_y = app->cam_y + px_y / old_px;
-            app->infinite_cell_px = new_px;
-            app->cam_x = world_x - px_x / new_px;
-            app->cam_y = world_y - px_y / new_px;
-            return;
+/* Advance the zoom one wheel notch. dir = +1 zooms in, -1 zooms out. The zoom
+   ladder runs, from most-in to most-out: cell_px 20..2..1 (chunky, ZOOM_STEP per
+   notch), then cells_per_px 1,2,4,… (sub-pixel, doubling per notch) up to
+   CELLS_PER_PX_MAX. Returns true if the zoom actually changed. */
+static bool zoom_step(App *app, int dir) {
+    if (dir > 0) { /* zoom in */
+        if (app->cells_per_px > 1) {
+            app->cells_per_px /= 2; /* toward 1px/cell */
+            return true;
         }
+        int np = app->infinite_cell_px + ZOOM_STEP;
+        if (np > INFINITE_CELL_MAX) np = INFINITE_CELL_MAX;
+        if (np == app->infinite_cell_px) return false;
+        app->infinite_cell_px = np;
+        return true;
     }
-    app->infinite_cell_px = new_px; /* no pixel size: zoom without re-anchoring */
+    /* zoom out */
+    if (app->infinite_cell_px > INFINITE_CELL_MIN) {
+        int np = app->infinite_cell_px - ZOOM_STEP;
+        if (np < INFINITE_CELL_MIN) np = INFINITE_CELL_MIN;
+        app->infinite_cell_px = np;
+        return true;
+    }
+    if (app->cells_per_px < CELLS_PER_PX_MAX) {
+        app->cells_per_px *= 2; /* sub-pixel: pack more cells per pixel */
+        return true;
+    }
+    return false;
+}
+
+/* Mouse-wheel zoom, keeping the world point under the cursor fixed so zoom feels
+   centred there. dir = +1 zooms in, -1 zooms out. mx,my are the cursor's
+   character-cell position. */
+static void zoom_infinite(App *app, int dir, int mx, int my) {
+    int cols, rows, xpx, ypx;
+    bool have_px = terminal_size(&cols, &rows) &&
+                   terminal_pixel_size(&xpx, &ypx) &&
+                   xpx / cols > 0 && ypx / rows > 0;
+
+    if (!have_px) {
+        zoom_step(app, dir); /* no pixel size: zoom without re-anchoring */
+        return;
+    }
+    int ccw = xpx / cols, cch = ypx / rows;
+    int px_x = mx * ccw, px_y = my * cch;
+    /* World cell currently under the cursor. */
+    int world_x = app->cam_x + screen_px_to_world(app, px_x);
+    int world_y = app->cam_y + screen_px_to_world(app, px_y);
+    if (!zoom_step(app, dir)) return;
+    /* Keep that world cell under the cursor at the new zoom. */
+    app->cam_x = world_x - screen_px_to_world(app, px_x);
+    app->cam_y = world_y - screen_px_to_world(app, px_y);
 }
 
 /* Handle a mouse event: the wheel zooms (anchored on the cursor), and the left
@@ -1056,58 +1154,15 @@ static bool has_rle_ext(const char *path) {
            (path[n - 1] == 'e' || path[n - 1] == 'E');
 }
 
-/* Load a pattern file into `board`, picking the format by extension: `.rle`
-   goes through the RLE parser (rle.c), anything else through the `.cells`
-   plaintext parser (config.c). A pattern larger than the seed board grows the
-   board to fit (the world is unbounded — a loaded pattern must never be clipped
-   to the -w/-h seed size), then is centred like config.c centres a `.cells`
-   pattern. So `-f foo.rle` and `-f foo.cells` land identically. Returns false
-   (and fills errbuf) on failure. */
-static bool load_pattern_file(Board *board, const char *path, char *errbuf,
-                              size_t errbuf_size) {
-    if (!has_rle_ext(path)) {
-        return config_load_file(board, path, errbuf, errbuf_size);
-    }
-
-    int *cells = NULL;
-    size_t count = 0;
-    if (!rle_load(path, &cells, &count, errbuf, errbuf_size)) {
-        return false;
-    }
-    /* Pattern extent. */
-    int w = 0, h = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (cells[2 * i] + 1 > w) w = cells[2 * i] + 1;
-        if (cells[2 * i + 1] + 1 > h) h = cells[2 * i + 1] + 1;
-    }
-    /* Grow the board to hold the whole pattern (never shrink below the seed
-       size) so nothing is clipped. */
-    if (w > board->width || h > board->height) {
-        int bw = w > board->width ? w : board->width;
-        int bh = h > board->height ? h : board->height;
-        board_free(board);
-        if (!board_init(board, bw, bh)) {
-            free(cells);
-            if (errbuf) snprintf(errbuf, errbuf_size,
-                                 "pattern too large to allocate (%dx%d)", bw, bh);
-            return false;
-        }
-    }
-    board_clear(board);
-    const int offx = (board->width - w) / 2;
-    const int offy = (board->height - h) / 2;
-    for (size_t i = 0; i < count; i++) {
-        board_set(board, offx + cells[2 * i], offy + cells[2 * i + 1], true);
-    }
-    free(cells);
-    return true;
-}
-
+/* Load a `.cells` pattern into the dense seed board. RLE `-f` files do NOT come
+   here — main routes them straight into the sparse engine (load_rle_file) so a
+   big pattern is never clipped to the -w/-h seed board. This path is only the
+   `.cells` plaintext format (small bundled patterns) and the default file. */
 static bool build_initial(Board *initial, const Options *opt) {
     if (opt->config_path != NULL) {
         /* An explicit -f must succeed; a bad path is a hard error. */
         char err[256];
-        if (!load_pattern_file(initial, opt->config_path, err, sizeof(err))) {
+        if (!config_load_file(initial, opt->config_path, err, sizeof(err))) {
             terminal_restore();
             printf(ANSI_SHOW_CURSOR);
             fprintf(stderr, "Error loading config: %s\n", err);
@@ -1119,7 +1174,7 @@ static bool build_initial(Board *initial, const Options *opt) {
     /* No -f: try the default config file, then silently fall back to random. */
     char path[1024];
     if (default_config_path(path, sizeof(path)) &&
-        load_pattern_file(initial, path, NULL, 0)) {
+        config_load_file(initial, path, NULL, 0)) {
         return true;
     }
     board_randomize(initial, opt->density);
@@ -1192,6 +1247,7 @@ int main(int argc, char **argv) {
     app.view_w = opt.width;
     app.view_h = opt.height;
     app.infinite_cell_px = INFINITE_CELL_PX;
+    app.cells_per_px = 1;
 
     app.engine = engine_new();
     app.history = history_new(HISTORY_CAP);
@@ -1211,23 +1267,38 @@ int main(int argc, char **argv) {
     sa_winch.sa_handler = on_winch;
     sigaction(SIGWINCH, &sa_winch, NULL);
 
-    /* Lay the initial pattern out in a dense seed board, hand it to the world,
-       then discard the board — the world is unbounded from here on. */
-    Board initial;
-    if (!board_init(&initial, opt.width, opt.height)) {
-        fprintf(stderr, "Failed to allocate board\n");
-        engine_free(app.engine);
-        history_free(app.history);
-        return 1;
-    }
-    if (!build_initial(&initial, &opt)) {
+    /* Seed the world. An RLE `-f` loads straight into the sparse engine (no dense
+       board, so a huge/sparse pattern is never clipped or over-allocated); every
+       other case (`.cells` `-f`, the default file, or a random start) lays out in
+       a transient dense seed board and hands it off. The world is unbounded from
+       here on. */
+    if (opt.config_path != NULL && has_rle_ext(opt.config_path)) {
+        char err[256];
+        if (!load_rle_file(&app, opt.config_path, NULL, err, sizeof(err))) {
+            terminal_restore();
+            printf(ANSI_SHOW_CURSOR);
+            fprintf(stderr, "Error loading config: %s\n", err);
+            engine_free(app.engine);
+            history_free(app.history);
+            return 1;
+        }
+    } else {
+        Board initial;
+        if (!board_init(&initial, opt.width, opt.height)) {
+            fprintf(stderr, "Failed to allocate board\n");
+            engine_free(app.engine);
+            history_free(app.history);
+            return 1;
+        }
+        if (!build_initial(&initial, &opt)) {
+            board_free(&initial);
+            engine_free(app.engine);
+            history_free(app.history);
+            return 1;
+        }
+        seed_from_board(&app, &initial);
         board_free(&initial);
-        engine_free(app.engine);
-        history_free(app.history);
-        return 1;
     }
-    seed_from_board(&app, &initial);
-    board_free(&initial);
 
     app.cursor_x = app.cam_x + app.view_w / 2;
     app.cursor_y = app.cam_y + app.view_h / 2;

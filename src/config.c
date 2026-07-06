@@ -95,6 +95,23 @@ bool config_load_file(Board *board, const char *path, char *errbuf,
         return false;
     }
 
+    /* Grow the board to hold the whole pattern (never shrink below the seed
+       size) so a pattern larger than the -w/-h seed region is not clipped — the
+       world is unbounded, so a loaded pattern must survive intact. */
+    if (pat.max_width > board->width || pat.count > board->height) {
+        int bw = pat.max_width > board->width ? pat.max_width : board->width;
+        int bh = pat.count > board->height ? pat.count : board->height;
+        board_free(board);
+        if (!board_init(board, bw, bh)) {
+            if (errbuf) {
+                snprintf(errbuf, errbuf_size,
+                         "pattern too large to allocate (%dx%d)", bw, bh);
+            }
+            pattern_free(&pat);
+            return false;
+        }
+    }
+
     /* Center the pattern in the board. */
     board_clear(board);
     int offx = (board->width - pat.max_width) / 2;

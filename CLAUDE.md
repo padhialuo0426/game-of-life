@@ -67,6 +67,34 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Sub-pixel zoom + RLE `-f` straight to the sparse engine.** Two changes
+  so patterns much larger than the screen display whole:
+  1. **Sub-pixel zoom.** The old zoom floor was 1 screen-pixel per cell, so a
+     pattern wider than the display could never be seen whole. Added
+     `cells_per_px` to `App` (world cells packed into one screen pixel, OR-
+     downsampled): the zoom ladder now runs `cell_px` 20..2..1 (chunky) then
+     `cells_per_px` 1,2,4,…256 (sub-pixel). Wheel zoom (`zoom_step`/`zoom_infinite`)
+     walks the whole ladder cursor-anchored; `render()` maps each live cell to
+     `(x-cam)/cpp` on a canvas sized in screen pixels (`ccols=vw/cpp`); pan
+     (`screen_delta_to_world`) and viewport (`infinite_viewport`) go through
+     `screen_px_to_world`. Status shows `Zoom: Npx` (chunky) or `Zoom: 1px=Nc`
+     (sub-pixel). `fit_view_to` now picks a sub-pixel level for oversized patterns
+     instead of clamping at 1px.
+  2. **RLE `-f` bypasses the dense seed board.** `-f *.rle` now loads straight into
+     the sparse engine via the shared `load_rle_file()` (used by both startup `-f`
+     and in-app `l`), so a pattern with a huge-but-sparse bounding box is only
+     limited by live-cell count, not by a dense board sized to its bbox. `.cells`
+     `-f`/default still use the dense seed board (`build_initial`→`config_load_file`,
+     which now also **grows the board to fit** so big `.cells` like glider-gun's
+     36-wide layout aren't clipped to the 30-wide seed region). Removed the old
+     `load_pattern_file` board-grow shim.
+  PTY-verified: a 8339×6299 / 1.51M-cell pattern (`-f`) loads `Live: 1509100` at
+  `Zoom: 1px=8c`, fully visible; wheel ladder 10..1px..1px=32c reverses cleanly;
+  glider/pulsar keep `Zoom: 10px`; glider-gun.cells now `Live: 36` (was 28).
+- **(Fedora) Large patterns load fully + zoom-to-fit.** (superseded in part by the
+  entry above; `fit_view_to`/`load_rle_file` now also do sub-pixel.) Two follow-up
+  bugs on big patterns: `-f` clipped into the seed board; both paths opened at the
+  default 10px zoom. See that entry for the current design.
 - **(Fedora) RLE save/load, clear, runtime speed.** `s`/`l` open a filename prompt
   (UI_FILE) to save/load community-standard **RLE** (`rle.{c,h}`; the format Golly/
   LifeWiki use). Load replaces the world, centres it, snapshots restart. `x` clears

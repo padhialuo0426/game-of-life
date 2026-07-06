@@ -111,8 +111,12 @@ The world is unbounded, so the terminal shows a **viewport** into it:
 
 - **Drag with the left button** to pan (the point under the cursor stays under
   it).
-- **Mouse wheel** to zoom, anchored on the cursor — from one pixel per cell when
-  zoomed all the way out, up to chunky cells.
+- **Mouse wheel** to zoom, anchored on the cursor — from chunky cells, down
+  through one pixel per cell, and further into **sub-pixel** zoom where each
+  screen pixel stands for a block of cells (a pixel lights if any cell in the
+  block is alive). Sub-pixel zoom lets a pattern far larger than the screen be
+  seen whole. The status line shows `Zoom: Npx` (N pixels per cell) or
+  `Zoom: 1px=Nc` (one pixel per N cells).
 - **`c`** recentres the view on the live cells' bounding box — handy when a
   pattern has drifted off-screen.
 - **`f`** toggles **follow mode**, which recentres every generation so you can
@@ -172,7 +176,9 @@ the interchange format for save/load because it stays compact for big patterns.)
 
 The board is drawn as a real **sixel** bitmap: each cell becomes a block of
 pixels, so the viewport is limited only by the terminal's **pixel** dimensions —
-it fills the whole window at any zoom, down to one pixel per cell.
+it fills the whole window at any zoom. Zooming out past one pixel per cell enters
+sub-pixel zoom (a block of cells per pixel), so even a pattern much larger than
+the screen can be viewed whole.
 
 Sixel support is detected at startup via a Device Attributes query. If your
 terminal supports sixel but is not detected, force detection on:
