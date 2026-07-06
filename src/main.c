@@ -487,8 +487,38 @@ static void step_once(App *app) {
     history_record(app->history, app->gen, engine_snapshot(app->engine));
 }
 
+/* Choose a zoom so a pattern spanning w x h cells fits the terminal's drawable
+   pixel area, and centre the camera on world point (cx, cy). Only ever zooms
+   *out* from the default (INFINITE_CELL_PX): a small pattern keeps the default
+   chunky zoom, while a big one is zoomed out — down to the 1px floor — so the
+   whole thing is visible on load instead of showing a fragment. Falls back to
+   the current zoom if the terminal pixel size is unavailable. */
+static void fit_view_to(App *app, int cx, int cy, int w, int h) {
+    int cols, rows, xpx, ypx;
+    if (w > 0 && h > 0 &&
+        terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx)) {
+        int cch = ypx / rows, ccw = xpx / cols;
+        if (cch > 0 && ccw > 0) {
+            int avail_w = xpx - ccw;
+            int avail_h = ypx - SIXEL_UI_ROWS * cch;
+            int fx = avail_w / w, fy = avail_h / h;
+            int px = fx < fy ? fx : fy;
+            if (px > INFINITE_CELL_PX) px = INFINITE_CELL_PX; /* never zoom in */
+            if (px < INFINITE_CELL_MIN) px = INFINITE_CELL_MIN;
+            app->infinite_cell_px = px;
+        }
+    }
+    int vw, vh;
+    infinite_viewport(app, &vw, &vh);
+    app->view_w = vw;
+    app->view_h = vh;
+    app->cam_x = cx - vw / 2;
+    app->cam_y = cy - vh / 2;
+}
+
 /* Seed the world from a dense board (world coordinates match board coordinates),
-   snapshot it as the restart config, and centre the viewport on it. */
+   snapshot it as the restart config, and centre the viewport on it, zoomed to
+   fit the loaded pattern. */
 static void seed_from_board(App *app, const Board *b) {
     engine_clear(app->engine);
     for (int y = 0; y < b->height; y++) {
@@ -501,12 +531,18 @@ static void seed_from_board(App *app, const Board *b) {
     history_clear(app->history);
     app->gen = 0;
 
-    int vw, vh;
-    infinite_viewport(app, &vw, &vh);
-    app->view_w = vw;
-    app->view_h = vh;
-    app->cam_x = b->width / 2 - vw / 2;
-    app->cam_y = b->height / 2 - vh / 2;
+    int minx, miny, maxx, maxy;
+    if (engine_bounds(app->engine, &minx, &miny, &maxx, &maxy)) {
+        fit_view_to(app, minx + (maxx - minx) / 2, miny + (maxy - miny) / 2,
+                    maxx - minx + 1, maxy - miny + 1);
+    } else {
+        int vw, vh;
+        infinite_viewport(app, &vw, &vh);
+        app->view_w = vw;
+        app->view_h = vh;
+        app->cam_x = b->width / 2 - vw / 2;
+        app->cam_y = b->height / 2 - vh / 2;
+    }
 }
 
 /* Centre the viewport on the live cells' bounding box. No-op when the world is
@@ -597,8 +633,8 @@ static void do_save(App *app) {
     }
 }
 
-/* Load an RLE pattern from file_buf, replacing the world and centring it in the
-   current view. */
+/* Load an RLE pattern from file_buf, replacing the world, then centre and
+   zoom-to-fit the pattern in the view. */
 static void do_load(App *app) {
     int *cells = NULL;
     size_t count = 0;
@@ -607,18 +643,15 @@ static void do_load(App *app) {
         snprintf(app->msg, sizeof(app->msg), "Load failed: %s", err);
         return;
     }
-    /* Pattern is top-left near (0,0); centre it on the current camera. */
+    /* Pattern is top-left near (0,0); place it at its own coordinates. */
     int w = 0, h = 0;
     for (size_t i = 0; i < count; i++) {
         if (cells[2 * i] + 1 > w) w = cells[2 * i] + 1;
         if (cells[2 * i + 1] + 1 > h) h = cells[2 * i + 1] + 1;
     }
-    const int ox = app->cam_x + app->view_w / 2 - w / 2;
-    const int oy = app->cam_y + app->view_h / 2 - h / 2;
-
     engine_clear(app->engine);
     for (size_t i = 0; i < count; i++) {
-        engine_set(app->engine, cells[2 * i] + ox, cells[2 * i + 1] + oy, true);
+        engine_set(app->engine, cells[2 * i], cells[2 * i + 1], true);
     }
     free(cells);
 
@@ -627,7 +660,7 @@ static void do_load(App *app) {
     history_clear(app->history);
     app->gen = 0;
     app->sim = SIM_STOPPED;
-    recenter_camera(app);
+    fit_view_to(app, w / 2, h / 2, w, h);
     snprintf(app->msg, sizeof(app->msg), "Loaded %zu cells from %s", count, app->file_buf);
 }
 
@@ -1025,9 +1058,11 @@ static bool has_rle_ext(const char *path) {
 
 /* Load a pattern file into `board`, picking the format by extension: `.rle`
    goes through the RLE parser (rle.c), anything else through the `.cells`
-   plaintext parser (config.c). RLE cells are centred in the board the same way
-   config.c centres a `.cells` pattern, so `-f foo.rle` and `-f foo.cells` land
-   identically. Returns false (and fills errbuf) on failure. */
+   plaintext parser (config.c). A pattern larger than the seed board grows the
+   board to fit (the world is unbounded — a loaded pattern must never be clipped
+   to the -w/-h seed size), then is centred like config.c centres a `.cells`
+   pattern. So `-f foo.rle` and `-f foo.cells` land identically. Returns false
+   (and fills errbuf) on failure. */
 static bool load_pattern_file(Board *board, const char *path, char *errbuf,
                               size_t errbuf_size) {
     if (!has_rle_ext(path)) {
@@ -1039,12 +1074,24 @@ static bool load_pattern_file(Board *board, const char *path, char *errbuf,
     if (!rle_load(path, &cells, &count, errbuf, errbuf_size)) {
         return false;
     }
-    /* Pattern extent, then centre it into the fixed-size board (over-large
-       patterns are clipped, exactly as the .cells path clips). */
+    /* Pattern extent. */
     int w = 0, h = 0;
     for (size_t i = 0; i < count; i++) {
         if (cells[2 * i] + 1 > w) w = cells[2 * i] + 1;
         if (cells[2 * i + 1] + 1 > h) h = cells[2 * i + 1] + 1;
+    }
+    /* Grow the board to hold the whole pattern (never shrink below the seed
+       size) so nothing is clipped. */
+    if (w > board->width || h > board->height) {
+        int bw = w > board->width ? w : board->width;
+        int bh = h > board->height ? h : board->height;
+        board_free(board);
+        if (!board_init(board, bw, bh)) {
+            free(cells);
+            if (errbuf) snprintf(errbuf, errbuf_size,
+                                 "pattern too large to allocate (%dx%d)", bw, bh);
+            return false;
+        }
     }
     board_clear(board);
     const int offx = (board->width - w) / 2;

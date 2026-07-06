@@ -81,6 +81,18 @@ so the installed `~/.local/bin` binary stays current for the user to test.
   seed identically (verified equal for blinker/glider/glider-gun/pulsar/lwss/acorn).
   Before this, `-f *.rle` was fed to the `.cells` plaintext parser and rendered
   garbage (the RLE header + `b`/`o` tokens became "live" cells).
+- **(Fedora) Large patterns load fully + zoom-to-fit.** Two follow-up bugs on big
+  patterns: (1) `-f` laid the pattern into the fixed `-w/-h` seed board (default
+  30×20) and **clipped** it — `load_pattern_file` now grows the board to the
+  pattern's extent so nothing is lost (also fixes glider-gun, 36 wide, clipping at
+  30); (2) both load paths opened at the default 10px zoom, so an 833-wide pattern
+  drew 8330px and you saw only a fragment. New `fit_view_to(app,cx,cy,w,h)` picks a
+  zoom so the whole bbox fits the terminal's pixel area, but **only ever zooms out**
+  from `INFINITE_CELL_PX` (small patterns keep the chunky default; big ones go down
+  to the 1px floor) and centres on the pattern. Wired into `seed_from_board` (`-f`/
+  default, via `engine_bounds`) and `do_load` (in-app `l`). PTY-verified: a 833×629
+  / 15091-cell pattern loads `Live: 15091` at `Zoom: 1px`; glider/pulsar/glider-gun
+  stay at `Zoom: 10px`.
 - **(Fedora) Jump: rewind + fast-forward, with an engine seam for Hashlife.**
   New `LifeEngine`/`EngineSnapshot` abstraction (`engine.{c,h}`) and a bounded
   history ring (`history.{c,h}`). `j` / the **Jump** button opens a prompt: type
