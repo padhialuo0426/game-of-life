@@ -97,7 +97,8 @@ typedef enum {
     UI_JUMP,
     UI_SAVE_NAME,  /* type a filename to save the current pattern */
     UI_LOAD_LIST,  /* browse/sort/pick a saved pattern (or type a path) */
-    UI_CONFIRM     /* a modal y/n over a save/load action */
+    UI_CONFIRM,    /* a modal y/n over a save/load action */
+    UI_HELP        /* a modal controls reference; closes on any key/click */
 } UiMode;
 
 /* Load-list sort key and a saved-pattern entry. */
@@ -118,17 +119,19 @@ typedef enum {
 /* Simulation sub-state, meaningful in UI_NORMAL. */
 typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
 
-/* Bottom button bar. Order matters: it is the left-to-right layout. There is no
-   Quit button — 'q' (or Ctrl-C) quits from any screen. */
+/* Bottom button bar. Order matters: it is the left-to-right layout. Each label
+   carries its keyboard shortcut in parentheses; the same key triggers the button
+   from UI_NORMAL (see handle_normal). Start/Pause are a single Play/Pause toggle.
+   Quit is a button too (mouse-only users need not know 'q'). */
 typedef enum {
-    BTN_START, BTN_PAUSE, BTN_STEP, BTN_RESET, BTN_EDIT, BTN_JUMP,
-    BTN_SAVE, BTN_LOAD,
+    BTN_PLAY, BTN_STEP, BTN_RESET, BTN_EDIT, BTN_JUMP,
+    BTN_SAVE, BTN_LOAD, BTN_HELP, BTN_QUIT,
     BTN_COUNT
 } Button;
 
 static const char *const BUTTON_LABELS[BTN_COUNT] = {
-    " Start ", " Pause ", " Step ", " Reset ", " Edit ", " Jump ",
-    " Save ", " Load "};
+    " Play/Pause (P) ", " Step (N) ", " Reset (R) ", " Edit (E) ", " Jump (J) ",
+    " Save (S) ", " Load (L) ", " Help (?) ", " Quit (Q) "};
 
 typedef struct {
     UiMode mode;
@@ -495,11 +498,12 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
                  "Backspace delete   Enter jump   Esc cancel");
     } else if (app->mode == UI_EDIT) {
         snprintf(hint, sizeof(hint), "Arrows move cursor   Space/Enter toggle   "
-                 "Tab/Esc leave   q quit");
+                 "Tab/Esc leave");
     } else {
-        snprintf(hint, sizeof(hint), "Drag pan  Wheel zoom  +/- speed  c center  "
-                 "f follow  j jump  x clear  s/l save/load  Tab select  "
-                 "Space/Enter go  q quit");
+        /* Only operations that are NOT on the menu bar (the bar carries its own
+           shortcut letters); plus the Tab/Space menu-navigation aids. */
+        snprintf(hint, sizeof(hint), "Drag pan  Wheel zoom  +/- speed  "
+                 "c center  f follow  x clear   |   Tab select  Space activate");
     }
     int hleft = (cols - (int)strlen(hint)) / 2; if (hleft < 0) hleft = 0;
     appendf(buf, cap, n, "\033[%d;%dH%s", img_rows + 4, hleft + 1, hint);
@@ -723,6 +727,33 @@ static void render_dialog(App *app) {
             snprintf(line, sizeof(line), "%.*s", cw, app->msg);
             dlg_row(buf, bcap, &n, cy, cx, 7, line);
         }
+    } else if (app->mode == UI_HELP) {
+        /* A compact controls reference. Kept short so it fits the box on small
+           terminals (content rows = chh). Closes on any key/click (handle_help). */
+        static const char *const help[] = {
+            "Conway's Game of Life \342\200\224 Controls",
+            "",
+            "Menu (click, or Tab/arrows then Space):",
+            "  Play/Pause (P)   run or pause",
+            "  Step (N)         advance one generation",
+            "  Reset (R)        back to generation 0",
+            "  Edit (E)         toggle cells with the cursor",
+            "  Jump (J)         leap to any generation",
+            "  Save (S) / Load (L)   store / recall a pattern",
+            "  Help (?)  Quit (Q)",
+            "",
+            "World:",
+            "  Drag = pan     Wheel = zoom",
+            "  + / - = speed  c = center  f = follow",
+            "  x = clear the world",
+            "",
+            "Press any key or click to close.",
+        };
+        int nlines = (int)(sizeof(help) / sizeof(help[0]));
+        for (int i = 0; i < nlines && i < chh; i++) {
+            snprintf(line, sizeof(line), "%.*s", cw, help[i]);
+            dlg_row(buf, bcap, &n, cy, cx, i, line);
+        }
     } else if (app->mode == UI_CONFIRM) {
         int midr = chh / 2 - 1; if (midr < 1) midr = 1;
         snprintf(line, sizeof(line), "%.*s", cw, app->confirm_msg);
@@ -837,7 +868,7 @@ static void render_dialog(App *app) {
    simply skips the frame. */
 static bool render(App *app) {
     if (app->mode == UI_SAVE_NAME || app->mode == UI_LOAD_LIST ||
-        app->mode == UI_CONFIRM) {
+        app->mode == UI_CONFIRM || app->mode == UI_HELP) {
         render_dialog(app);
         return true;
     }
@@ -1395,13 +1426,13 @@ static void jump_to(App *app, long target) {
 /* Per-mode input handling                                            */
 /* ------------------------------------------------------------------ */
 
-static void activate_button(App *app) {
-    switch (app->selected) {
-        case BTN_START:
-            if (app->sim != SIM_RUNNING) app->sim = SIM_RUNNING;
-            break;
-        case BTN_PAUSE:
-            if (app->sim == SIM_RUNNING) app->sim = SIM_PAUSED;
+/* Perform a button's action. Shared by the menu bar (activate the selected
+   button) and the keyboard shortcuts in handle_normal, so the two never drift. */
+static void activate_button_at(App *app, int b) {
+    switch (b) {
+        case BTN_PLAY:
+            /* One toggle: running -> paused, anything else -> running. */
+            app->sim = (app->sim == SIM_RUNNING) ? SIM_PAUSED : SIM_RUNNING;
             break;
         case BTN_STEP:
             step_once(app);
@@ -1432,7 +1463,17 @@ static void activate_button(App *app) {
         case BTN_LOAD:
             enter_load(app);
             break;
+        case BTN_HELP:
+            app->mode = UI_HELP;
+            break;
+        case BTN_QUIT:
+            app->running = false;
+            break;
     }
+}
+
+static void activate_button(App *app) {
+    activate_button_at(app, app->selected);
 }
 
 /* Convert a delta measured in screen character cells into a delta in world
@@ -1577,27 +1618,27 @@ static void handle_normal(App *app, Key key) {
             activate_button(app);
             break;
         case KEY_OTHER:
-            /* 'c' recentres on the pattern once; 'f' toggles a follow mode that
-               recentres every generation. */
+            /* Menu-button shortcuts (P/N/R/E/J/S/L/?) mirror the bar; the rest are
+               world-navigation keys not on the bar (c/f/x, +/-). */
             {
                 const int c = terminal_char();
-                if (c == 'c' || c == 'C') {
-                    recenter_camera(app);
-                } else if (c == 'f' || c == 'F') {
-                    app->follow = !app->follow;
-                    if (app->follow) recenter_camera(app);
-                } else if (c == 'j' || c == 'J') {
-                    enter_jump(app);
-                } else if (c == 'x' || c == 'X') {
-                    clear_world(app);
-                } else if (c == '+' || c == '=') {
-                    adjust_speed(app, +1);
-                } else if (c == '-' || c == '_') {
-                    adjust_speed(app, -1);
-                } else if (c == 's' || c == 'S') {
-                    enter_save(app);
-                } else if (c == 'l' || c == 'L') {
-                    enter_load(app);
+                switch (c) {
+                    case 'p': case 'P': activate_button_at(app, BTN_PLAY);  break;
+                    case 'n': case 'N': activate_button_at(app, BTN_STEP);  break;
+                    case 'r': case 'R': activate_button_at(app, BTN_RESET); break;
+                    case 'e': case 'E': activate_button_at(app, BTN_EDIT);  break;
+                    case 'j': case 'J': activate_button_at(app, BTN_JUMP);  break;
+                    case 's': case 'S': activate_button_at(app, BTN_SAVE);  break;
+                    case 'l': case 'L': activate_button_at(app, BTN_LOAD);  break;
+                    case '?':           activate_button_at(app, BTN_HELP);  break;
+                    case 'c': case 'C': recenter_camera(app);              break;
+                    case 'f': case 'F':
+                        app->follow = !app->follow;
+                        if (app->follow) recenter_camera(app);
+                        break;
+                    case 'x': case 'X': clear_world(app);                  break;
+                    case '+': case '=': adjust_speed(app, +1);            break;
+                    case '-': case '_': adjust_speed(app, -1);            break;
                 }
             }
             break;
@@ -1856,6 +1897,20 @@ static void handle_confirm(App *app, Key key) {
     }
 }
 
+/* The Help overlay is purely informational: any key or mouse click dismisses it
+   back to the world. Ctrl-C still quits the whole program. */
+static void handle_help(App *app, Key key) {
+    if (key == KEY_NONE) return;
+    if (key == KEY_QUIT && terminal_char() == 0x03) {
+        app->running = false;
+        return;
+    }
+    app->mode = UI_NORMAL;
+    /* The world was covered by the box; force a repaint to erase it. */
+    app->sx_drawn = false;
+    app->sx_last_w = app->sx_last_h = -1;
+}
+
 /* Dispatch a key to the handler for the current mode. */
 static void handle_key(App *app, Key key) {
     switch (app->mode) {
@@ -1864,6 +1919,7 @@ static void handle_key(App *app, Key key) {
         case UI_SAVE_NAME: handle_save_name(app, key); break;
         case UI_LOAD_LIST: handle_load_list(app, key); break;
         case UI_CONFIRM:   handle_confirm(app, key); break;
+        case UI_HELP:      handle_help(app, key); break;
         default:           handle_normal(app, key); break;
     }
 }
@@ -1974,7 +2030,7 @@ int main(int argc, char **argv) {
     App app = {0};
     app.mode = UI_NORMAL;
     app.sim = SIM_STOPPED;
-    app.selected = BTN_START;
+    app.selected = BTN_PLAY;
     app.delay_ms = opt.delay_ms;
     app.running = true;
     app.blink_on = true;

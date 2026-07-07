@@ -72,12 +72,36 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 - `src/settings.{c,h}` — JSON-ish persisted settings in `$XDG_CONFIG_HOME/game-of-life/
   settings.json`, plus dir helpers: `settings_config_dir` (config),
   `settings_data_dir`/`settings_saves_dir` (user data — saved patterns), `settings_mkdirs`.
-- `src/main.c` — UI state machine (Normal/Edit/Jump + Save/Load/Confirm dialogs),
+- `src/main.c` — UI state machine (Normal/Edit/Jump + Save/Load/Confirm/Help dialogs),
   render loop (world image + `render_dialog` for the full-screen browsers), input
   handling, mouse pan/zoom + clickable button bar and dialog rows, recenter/follow.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Button-bar overhaul: Play/Pause toggle, per-button shortcuts, Help +
+  Quit buttons.** The bar is now **Play/Pause · Step · Reset · Edit · Jump · Save ·
+  Load · Help · Quit** (9 buttons). Changes:
+  - **Start + Pause merged** into one `BTN_PLAY` toggle (`activate_button_at`:
+    RUNNING → PAUSED, anything else → RUNNING).
+  - **Every label carries its shortcut** in parens (`" Play/Pause (P) "`,
+    `" Step (N) "`, `" Reset (R) "`, `" Edit (E) "`, `" Jump (J) "`, `" Save (S) "`,
+    `" Load (L) "`, `" Help (?) "`, `" Quit (Q) "`). Pressing that key from
+    UI_NORMAL fires the same action — `handle_normal`'s KEY_OTHER now dispatches
+    P/N/R/E/J/S/L/? through the shared **`activate_button_at(app,btn)`** (the menu
+    click path and the keyboard path share it so they never drift). c/f/x and +/-
+    remain the non-menu world keys.
+  - **Bottom hint trimmed** to only non-menu ops + the menu-nav aids: "Drag pan
+    Wheel zoom  +/- speed  c center  f follow  x clear  |  Tab select  Space
+    activate" (Jump/Save/Load/Quit dropped — they're on the bar now).
+  - **New `[ Help (?) ]` button + `UI_HELP` MODAL overlay** (a fourth `render_dialog`
+    branch: a compact static controls list, capped to the box's `chh` rows).
+    `handle_help` dismisses on any key/click (Ctrl-C still quits); reached only from
+    UI_NORMAL, returns there and forces a world repaint to erase the box.
+  - **`[ Quit (Q) ]` button back** (`BTN_QUIT` → `running=false`); mouse-only users
+    no longer need to know 'q'. The old "there is no Quit button" comment is gone.
+  PTY-verified: all 9 labels centred on the bar; trimmed hint; 'p' toggles
+  RUNNING↔PAUSED; '?' opens Help (Controls text) and Space/any click closes it;
+  Help-button and Quit-button mouse clicks work; 'q'/Quit exits.
 - **(Fedora) Unify the overlays under one "popup" model + shared `overlay_box`.**
   Per the STICKY/TIMED/MODAL taxonomy (all three float over the world; they differ
   only in *when they close*): the status HUD is STICKY (redrawn each frame), the
