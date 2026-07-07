@@ -155,6 +155,9 @@ typedef struct {
        zoomable viewport rendered straight from its live cells. */
     LifeEngine *engine;         /* the world */
     EngineSnapshot *restart;    /* generation-0 config restored by Reset */
+    EngineSnapshot *edit_backup;/* world snapshot taken on entering UI_EDIT, so
+                                   Esc can Discard the edits (NULL outside edit) */
+    long edit_backup_gen;       /* the generation at that point */
     History *history;           /* recent generations, for instant rewind */
     int cam_x, cam_y;           /* viewport top-left in world coordinates */
     int view_w, view_h;         /* current viewport size in cells */
@@ -478,9 +481,14 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
     /* Button bar, centred on the row one blank line below the image. */
     int bleft = (cols - button_bar_width()) / 2; if (bleft < 0) bleft = 0;
     appendf(buf, cap, n, "\033[%d;%dH", img_rows + 2, bleft + 1);
+    /* Highlight the selected button in world view (Normal) and while its own modal
+       mode is active (Edit/Jump) — a click that entered that mode should not make
+       the cursor vanish from the button it landed on. */
+    bool show_sel = app->mode == UI_NORMAL || app->mode == UI_EDIT ||
+                    app->mode == UI_JUMP;
     for (int b = 0; b < BTN_COUNT; b++) {
         if (b) appendf(buf, cap, n, " ");
-        if (app->mode == UI_NORMAL && b == app->selected) {
+        if (show_sel && b == app->selected) {
             appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, BUTTON_LABELS[b]);
         } else {
             appendf(buf, cap, n, "[%s]", BUTTON_LABELS[b]);
@@ -497,8 +505,8 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
         snprintf(hint, sizeof(hint), "Type a generation (forward or back)   "
                  "Backspace delete   Enter jump   Esc cancel");
     } else if (app->mode == UI_EDIT) {
-        snprintf(hint, sizeof(hint), "Arrows move cursor   Space/Enter toggle   "
-                 "Tab/Esc leave");
+        snprintf(hint, sizeof(hint), "Arrows move cursor   Space toggle cell   "
+                 "Enter apply   Esc discard");
     } else {
         /* Only operations that are NOT on the menu bar (the bar carries its own
            shortcut letters); plus the Tab/Space menu-navigation aids. */
@@ -763,7 +771,7 @@ static void render_dialog(App *app) {
             "  Play/Pause (P)   run or pause",
             "  Step (N)         advance one generation",
             "  Reset (R)        back to generation 0",
-            "  Edit (E)         toggle cells with the cursor",
+            "  Edit (E)         Space toggle, Enter apply, Esc discard",
             "  Jump (J)         leap to any generation",
             "  Save (S) / Load (L)   store / recall a pattern",
             "  Help (?)  Quit (Q)",
@@ -1474,13 +1482,20 @@ static void activate_button_at(App *app, int b) {
             break;
         case BTN_EDIT:
             app->mode = UI_EDIT;
+            app->selected = BTN_EDIT; /* keep the highlight on Edit while editing */
             app->sim = SIM_STOPPED;
             app->blink_on = true;
+            /* Snapshot the world so Esc can Discard the session's edits; Enter
+               Applies (keeps them). */
+            engine_snapshot_free(app->edit_backup);
+            app->edit_backup = engine_snapshot(app->engine);
+            app->edit_backup_gen = app->gen;
             /* Start the cursor at the centre of the current view. */
             app->cursor_x = app->cam_x + app->view_w / 2;
             app->cursor_y = app->cam_y + app->view_h / 2;
             break;
         case BTN_JUMP:
+            app->selected = BTN_JUMP; /* keep the highlight on Jump while in the prompt */
             enter_jump(app);
             break;
         case BTN_SAVE:
@@ -1695,20 +1710,30 @@ static void handle_edit(App *app, Key key) {
         case KEY_RIGHT: app->cursor_x++; break;
         case KEY_UP:    app->cursor_y--; break;
         case KEY_DOWN:  app->cursor_y++; break;
-        case KEY_SPACE:
-        case KEY_ENTER: {
+        case KEY_SPACE: {
+            /* Space is the only edit action: toggle the cell under the cursor. */
             bool alive = engine_get(app->engine, app->cursor_x, app->cursor_y);
             engine_set(app->engine, app->cursor_x, app->cursor_y, !alive);
             break;
         }
-        case KEY_TAB:
-        case KEY_ESC:
-            /* Leave edit mode; the edited world becomes the new restart config,
-               and it starts a fresh timeline. */
+        case KEY_ENTER:
+            /* Apply: keep the edits. The edited world becomes the new restart
+               config and starts a fresh timeline. */
             engine_snapshot_free(app->restart);
             app->restart = engine_snapshot(app->engine);
+            engine_snapshot_free(app->edit_backup);
+            app->edit_backup = NULL;
             history_clear(app->history);
             app->gen = 0;
+            app->sim = SIM_STOPPED;
+            app->mode = UI_NORMAL;
+            break;
+        case KEY_ESC:
+            /* Discard: restore the world captured when edit mode began. */
+            engine_restore(app->engine, app->edit_backup);
+            app->gen = app->edit_backup_gen;
+            engine_snapshot_free(app->edit_backup);
+            app->edit_backup = NULL;
             app->sim = SIM_STOPPED;
             app->mode = UI_NORMAL;
             break;
@@ -2204,6 +2229,7 @@ int main(int argc, char **argv) {
 
     engine_free(app.engine);
     engine_snapshot_free(app.restart);
+    engine_snapshot_free(app.edit_backup);
     history_free(app.history);
     free(app.saves);
     return 0;

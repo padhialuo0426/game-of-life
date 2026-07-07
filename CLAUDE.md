@@ -78,6 +78,24 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Keep the selected button lit in Edit/Jump + transactional Edit
+  (Space/Enter/Esc).** Two fixes:
+  - **Highlight no longer vanishes** when a click enters Edit or Jump. Those modes
+    render the world (not a full-screen dialog), and `append_controls` only lit the
+    selection in UI_NORMAL, so the button the cursor landed on went dark until you
+    left. Now `show_sel` also covers UI_EDIT / UI_JUMP, and entering either mode
+    pins `app->selected` to `BTN_EDIT` / `BTN_JUMP` (so the keyboard `e`/`j` paths
+    match the mouse path and the highlight stays put after leaving too).
+  - **Edit is now a transaction.** Space is the *only* edit action (toggle the cell
+    under the cursor); **Enter = Apply** (keep the edits, they become the new
+    restart config + fresh timeline, gen→0) and **Esc = Discard** (restore the
+    world snapshot taken on entry). New `App.edit_backup`/`edit_backup_gen`
+    (an `EngineSnapshot` captured in the `BTN_EDIT` case, restored by Esc, freed on
+    Apply/Discard and at exit). Enter no longer toggles; Tab no longer leaves.
+    Hint + Help text updated accordingly.
+  PTY-verified: Edit/Jump stay highlighted on entry and after leaving; Space
+  toggles (Live 5→6); Esc restores Live to 5; re-enter + Space + Enter keeps Live 6
+  and resets Gen to 0.
 - **(Fedora) Instant click feedback: highlight the clicked button before its action
   runs.** Clicking a menu button that opens a modal (Save/Load/Jump/Help) used to
   leave the bar showing the *old* selection until the modal closed, because
