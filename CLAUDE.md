@@ -78,6 +78,16 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Instant click feedback: highlight the clicked button before its action
+  runs.** Clicking a menu button that opens a modal (Save/Load/Jump/Help) used to
+  leave the bar showing the *old* selection until the modal closed, because
+  `handle_mouse` set `app->selected` then immediately called `activate_button`, and
+  the loop's next `render` drew the dialog without repainting the bar. New
+  **`flash_selected_button(app)`** repaints the bar (current selection in reverse
+  video) and flushes it *now*, called on a bar click just before `activate_button`.
+  The bar sits below the dialog box, so the moved highlight stays visible for the
+  whole modal. PTY-verified: clicking Save immediately shows `[ Save (S) ]`
+  highlighted (and clears the prior Play highlight) while the Save dialog is open.
 - **(Fedora) Button-bar overhaul: Play/Pause toggle, per-button shortcuts, Help +
   Quit buttons.** The bar is now **Play/Pause · Step · Reset · Edit · Jump · Save ·
   Load · Help · Quit** (9 buttons). Changes:

@@ -537,6 +537,32 @@ static void compute_button_geometry(App *app, int img_rows, int cols) {
     }
 }
 
+/* Repaint the button bar with the current selection highlighted and flush it to
+   the terminal right now, reusing the geometry from the last emit_frame (bar_row).
+   A mouse click on a menu button should give instant feedback — the cursor moving
+   onto that button — before the button's action runs. For an action that opens a
+   modal (Save/Load/Jump/Help) the main loop's next render draws the dialog and
+   never repaints the bar, so without this the highlight would only appear after
+   the modal closes. No-op if no bar is on screen (already inside a dialog). */
+static void flash_selected_button(const App *app) {
+    if (app->bar_row < 0) return;
+    int cols, rows;
+    if (!terminal_size(&cols, &rows)) return;
+    char buf[1024]; size_t n = 0;
+    int bleft = (cols - button_bar_width()) / 2; if (bleft < 0) bleft = 0;
+    /* Position at the bar row (1-based = bar_row+1) and reset any stale SGR. */
+    appendf(buf, sizeof(buf), &n, ANSI_RESET "\033[%d;%dH", app->bar_row + 1, bleft + 1);
+    for (int b = 0; b < BTN_COUNT; b++) {
+        if (b) appendf(buf, sizeof(buf), &n, " ");
+        if (b == app->selected)
+            appendf(buf, sizeof(buf), &n, ANSI_REVERSE "[%s]" ANSI_RESET, BUTTON_LABELS[b]);
+        else
+            appendf(buf, sizeof(buf), &n, "[%s]", BUTTON_LABELS[b]);
+    }
+    fwrite(buf, 1, n, stdout);
+    fflush(stdout);
+}
+
 /* Shared primitive behind every "popup" overlay (see popup.h for the STICKY /
    TIMED / MODAL taxonomy): draw an opaque, bg-filled box at 1-based (x0,y0) of
    size w x h floating over the world, bordered with the `corner`/`horiz`/`vert`
@@ -1568,6 +1594,9 @@ static void handle_mouse(App *app) {
                 for (int b = 0; b < BTN_COUNT; b++) {
                     if (m.x >= app->btn_col0[b] && m.x < app->btn_col1[b]) {
                         app->selected = b;
+                        /* Show the selection move immediately, before the action
+                           (which may open a modal that hides the bar). */
+                        flash_selected_button(app);
                         activate_button(app);
                         break;
                     }
