@@ -84,6 +84,14 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Linear wheel-zoom + fixed 10 ms speed steps.** Two step-size tweaks:
+  `ZOOM_STEP` 2→1 so each wheel notch moves the chunky zoom exactly 1 px/cell
+  (20..1; the sub-pixel ladder still doubles per notch), and `adjust_speed` is now
+  additive — each `+`/`-` press moves `delay_ms` by a fixed `SPEED_STEP_MS` (10 ms,
+  clamped 0..2000; replaces the old ×0.7/×1.4 multiplicative nudge and its
+  `SPEED_MIN_DELAY_MS` snap). An off-grid delay from the CLI/settings snaps onto
+  the 10 ms grid on the first press. PTY-verified: wheel 10→9→8→7 px and back;
+  `-`×3 takes Delay 120→150, `+`×4 takes it 150→110.
 - **(Fedora) Start/Pause label toggle + Edit "Clear" button.** Two UI touches:
   - **BTN_PLAY now shows the *action*, not both names.** The button reads
     `Start` while stopped/paused and `Pause` while running (was the static

@@ -103,7 +103,7 @@ static const char *SGR_WARN = "\033[33m";     /* yellow — paused */
 #define INFINITE_CELL_PX 10
 #define INFINITE_CELL_MIN 1  /* 1 device pixel per cell — the chunky-zoom floor */
 #define INFINITE_CELL_MAX SIXEL_CELL_MAX
-#define ZOOM_STEP 2 /* pixels per wheel notch */
+#define ZOOM_STEP 1 /* pixels per wheel notch */
 /* Sub-pixel zoom: once at 1px/cell, further zoom-out packs cells_per_px world
    cells into each screen pixel (OR-downsampled) so huge patterns fit whole. This
    caps how far out you can go — 256 cells/px lets a viewport span ~256x the
@@ -118,10 +118,10 @@ static const char *SGR_WARN = "\033[33m";     /* yellow — paused */
 #define HISTORY_CAP 1024
 #define JUMP_FIELD_MAX 1000000000L /* cap the typed target to keep it sane */
 
-/* Runtime speed control: the per-generation delay is nudged multiplicatively
-   between "as fast as possible" (0 ms) and SPEED_MAX_DELAY_MS. */
+/* Runtime speed control: the per-generation delay moves in fixed SPEED_STEP_MS
+   nudges between "as fast as possible" (0 ms) and SPEED_MAX_DELAY_MS. */
 #define SPEED_MAX_DELAY_MS 2000
-#define SPEED_MIN_DELAY_MS 10  /* smallest non-zero delay before snapping to 0 */
+#define SPEED_STEP_MS 10 /* delay change per +/- keypress */
 
 /* Longest pattern filename the file prompt accepts. */
 #define FILE_BUF_MAX 255
@@ -1348,15 +1348,11 @@ static void clear_world(App *app) {
 }
 
 /* Nudge the running speed. dir > 0 speeds up (less delay), dir < 0 slows down.
-   Multiplicative so one keypress covers the whole 0..SPEED_MAX_DELAY_MS range in
-   a few presses; snaps to 0 ms ("max speed") below SPEED_MIN_DELAY_MS. */
+   Fixed SPEED_STEP_MS per keypress; a delay off the 10 ms grid (from the CLI or
+   settings) snaps onto it after the first press. */
 static void adjust_speed(App *app, int dir) {
-    long d = app->delay_ms;
-    if (dir > 0) {
-        d = (d <= SPEED_MIN_DELAY_MS) ? 0 : (long)(d * 0.7);
-    } else {
-        d = (d == 0) ? SPEED_MIN_DELAY_MS : (long)(d * 1.4) + 1;
-    }
+    long d = app->delay_ms - (long)dir * SPEED_STEP_MS;
+    d = (d / SPEED_STEP_MS) * SPEED_STEP_MS; /* snap onto the step grid */
     if (d < 0) d = 0;
     if (d > SPEED_MAX_DELAY_MS) d = SPEED_MAX_DELAY_MS;
     app->delay_ms = d;
@@ -1831,8 +1827,8 @@ static void screen_delta_to_world(const App *app, int dcol, int drow,
 }
 
 /* Advance the zoom one wheel notch. dir = +1 zooms in, -1 zooms out. The zoom
-   ladder runs, from most-in to most-out: cell_px 20..2..1 (chunky, ZOOM_STEP per
-   notch), then cells_per_px 1,2,4,… (sub-pixel, doubling per notch) up to
+   ladder runs, from most-in to most-out: cell_px 20..2..1 (chunky, ZOOM_STEP=1px
+   per notch), then cells_per_px 1,2,4,… (sub-pixel, doubling per notch) up to
    CELLS_PER_PX_MAX. Returns true if the zoom actually changed. */
 static bool zoom_step(App *app, int dir) {
     if (dir > 0) { /* zoom in */
