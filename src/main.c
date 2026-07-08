@@ -863,20 +863,18 @@ static void dlg_row(char *buf, size_t cap, size_t *n, int cy, int cx, int line,
             cy + line + 1, cx + 1, text);
 }
 
-/* A dialog title: bold + accent colour (dlg_row's trailing reset closes it). */
+/* A dialog title: bold + accent colour. */
 static void dlg_title(char *buf, size_t cap, size_t *n, int cy, int cx, int line,
                       const char *text) {
-    char t[160];
-    snprintf(t, sizeof(t), "%s%s", SGR_TITLE, text);
-    dlg_row(buf, cap, n, cy, cx, line, t);
+    appendf(buf, cap, n, "\033[%d;%dH" DLG_BG "%s%s" ANSI_RESET,
+            cy + line + 1, cx + 1, SGR_TITLE, text);
 }
 
 /* A dimmed content line (secondary metadata / footer hints). */
 static void dlg_dim(char *buf, size_t cap, size_t *n, int cy, int cx, int line,
                     const char *text) {
-    char t[1024];
-    snprintf(t, sizeof(t), SGR_DIM "%s", text);
-    dlg_row(buf, cap, n, cy, cx, line, t);
+    appendf(buf, cap, n, "\033[%d;%dH" DLG_BG SGR_DIM "%s" ANSI_RESET,
+            cy + line + 1, cx + 1, text);
 }
 
 /* Draw a modal's clickable footer buttons on content-line `line`: an optional
