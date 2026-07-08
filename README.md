@@ -1,235 +1,201 @@
-# Conway's Game of Life
+# 康威生命游戏
 
-*[中文说明](README.zh.md)*
+*[English](README.en.md)*
 
-An interactive terminal implementation of Conway's Game of Life, written in C
-and built with CMake. It is an **unbounded sandbox**: the world has no walls and
-is stored sparsely (only the live cells are kept, in a hash set), so memory and
-per-generation cost scale with the population, not with any area — a glider just
-keeps travelling forever. You **pan** the view by dragging with the mouse,
-**zoom** with the wheel, and can drop or draw patterns anywhere. The board is
-drawn with **sixel** real-pixel graphics, with an on-screen button bar.
+一个跑在终端里的交互式康威生命游戏,C11 编写、CMake 构建。世界是一个**无界沙盒**:
+没有墙,活细胞存放在稀疏哈希集合里,内存与每代计算量只正比于**存活细胞数**,与面积
+无关——滑翔机会永远飞下去。画面用**真像素图形**绘制(Kitty 图形协议优先,Sixel 回退),
+从按钮栏到对话框全程可以只用鼠标操作。
 
-> **Requires a sixel-capable terminal** (e.g. iTerm2, Konsole, WezTerm, foot,
-> `xterm -ti vt340`, mlterm, recent Windows Terminal). Terminals without sixel —
-> including the default macOS Terminal.app — are not supported; the program
-> exits with a message on startup.
+## 主要特性
 
-## Build
+- **无界世界** —— 稀疏存储,只受活细胞数限制;百万级细胞的图案照常加载、运行。
+- **真像素渲染** —— 自动检测 **Kitty 图形协议**(KGP),不支持则回退 **Sixel**;
+  帧间原子替换 + 同步输出(DEC 2026),缩放、重绘、演化全程**无闪屏**。
+- **鼠标全操作** —— 左键拖拽平移、滚轮以光标为锚缩放;按钮栏、对话框、列表行、
+  排序表头全部可点;点击对话框外即取消。
+- **深度缩放** —— 从每格 20 像素一路缩到每格 1 像素,再进入**亚像素**级
+  (最多 1 像素 = 256 格),远大于屏幕的图案也能一屏看全。
+- **事务式编辑器** —— 点击/拖拽绘制(Bresenham 插值,快速笔画不断线),
+  Enter 应用、Esc 丢弃、一键清空;绘制与平移可切换。
+- **时间旅行** —— Jump 跳到任意代:近处回溯**瞬时**(历史环,256 MB 内存预算),
+  远处从第 0 代重放;快进全程可中断,途中退出立即生效。
+- **RLE 存取浏览器** —— 社区标准 RLE 格式;列表可按名字/大小/时间排序,支持删除、
+  覆盖/替换确认、加载任意路径;随安装附带 **14 个经典图案**。
+- **多核演化** —— 有 OpenMP 时,两万细胞以上的世界自动按行带并行步进,
+  结果与串行逐位一致。
+- **顺手的细节** —— 跟随模式盯住飞船、一键回中、±10ms 速度微调、设置跨次运行记忆、
+  崩溃也能完好恢复终端、遵守 `NO_COLOR`。
 
-Two CMake presets are provided: `debug` and `release`.
+> **需要图形能力的终端**:支持 **KGP** 的(Kitty、Ghostty、WezTerm、Konsole ≥ 24.08)
+> 或支持 **Sixel** 的(iTerm2、Konsole、WezTerm、foot、`xterm -ti vt340`、mlterm、
+> 较新的 Windows Terminal)。两者都不支持的终端——包括 macOS 自带的 Terminal.app——
+> 无法运行,启动时会打印提示并退出。
+
+## 构建
+
+提供两个 CMake 预设:`debug` 和 `release`。
 
 ```sh
 cmake --preset release
 cmake --build --preset release
-# or: cmake --preset debug && cmake --build --preset debug
+# 或:cmake --preset debug && cmake --build --preset debug
 ```
 
-The binary is written to `build/<preset>/game-of-life`.
+可执行文件生成在 `build/<preset>/game-of-life`。
 
-If **OpenMP** is available it is used automatically to spread each generation's
-work across CPU cores (a big help on large patterns); without it the program
-builds and runs single-threaded. Set `OMP_NUM_THREADS` to tune the core count.
+依赖 **zlib**(KGP 载荷压缩,macOS/Linux 均自带)。若系统有 **OpenMP** 会自动启用
+多核步进,没有则单线程构建运行;用 `OMP_NUM_THREADS` 可调核心数。
 
-## Install / Uninstall
+## 安装 / 卸载
 
-Installation goes to the user's home by default (no root needed):
+默认安装到用户主目录(无需 root):
 
-- the executable → `~/.local/bin/game-of-life`
-- the default pattern → `~/.local/share/game-of-life/saves/default.rle`
-  (respects `XDG_DATA_HOME`; this is the file the program auto-loads when run
-  without `-f`, and it sits alongside your own saved patterns)
+- 可执行文件 → `~/.local/bin/game-of-life`
+- 内置图案(含自动加载的 `default.rle`)→ `~/.local/share/game-of-life/saves/`
+  (遵循 `XDG_DATA_HOME`,与你自己的存档放在一起)
 
 ```sh
-cmake --build --preset release          # build first
-cmake --install build/release           # install
-# or from the build dir: cd build/release && make install
+cmake --build --preset release          # 先构建
+cmake --install build/release           # 安装
 
-cmake --build build/release --target uninstall
-# or from the build dir: cd build/release && make uninstall
+cmake --build build/release --target uninstall   # 卸载
 ```
 
-Notes:
+说明:
 
-- Make sure `~/.local/bin` is on your `PATH` to run `game-of-life` directly.
-- Installing never overwrites an existing `default.rle` you have customised.
-- **uninstall** removes the executable, the installed `default.rle`, and the
-  `settings.json` file (and the config/data directories if they end up empty). It
-  never deletes your own saved patterns.
-- For a system-wide install, override the prefix:
-  `cmake --preset release -DCMAKE_INSTALL_PREFIX=/usr/local` (then `sudo cmake
-  --install build/release`).
+- 确保 `~/.local/bin` 在 `PATH` 中,即可直接敲 `game-of-life` 运行。
+- 安装**绝不覆盖**你已有的同名图案(自定义的 `default.rle` 是安全的)。
+- 卸载删除可执行文件、当初安装的那批内置图案和 `settings.json`
+  (目录变空则一并删除),**绝不动**你自己保存的图案。
+- 系统级安装:`cmake --preset release -DCMAKE_INSTALL_PREFIX=/usr/local`,
+  再 `sudo cmake --install build/release`。
 
-## Run
+## 运行
 
 ```sh
-./build/release/game-of-life                              # default / remembered
-./build/release/game-of-life -f saves/glider.rle         # load a pattern file
-./build/release/game-of-life -f saves/pulsar.rle -w 40 -h 24       # seed-region size
-./build/release/game-of-life --help                      # all options
+game-of-life                             # 默认图案 / 上次记住的配置
+game-of-life -f saves/glider-gun.rle     # 加载图案文件
+game-of-life --help                      # 全部选项
 ```
 
-A sixel-capable interactive terminal is required (see [Requirements](#conways-game-of-life)).
+## 操作
 
-## Controls
+图像下方是九个按钮,每个标签都带着自己的快捷键:
 
-The bar below the image has eight buttons:
-**Start / Pause / Step / Reset / Edit / Jump / Save / Load**. Click a button with
-the mouse, or move the selection with `Tab`/arrows and press `Space`/`Enter`.
-There is no Quit button — `q` (or `Ctrl-C`) quits from any screen.
+**Start/Pause (P) · Step (N) · Reset (R) · Edit (E) · Jump (J) · Save (S) ·
+Load (L) · Help (?) · Quit (Q)**
 
-The board is drawn as a sixel bitmap: each cell is a square block of pixels whose
-size is the current zoom level.
+鼠标点击即触发;也可以用 `Tab`/方向键移动选择、`Space`/`Enter` 触发,或直接按
+括号里的快捷键。第一个按钮是**开始/暂停切换**:停着时显示 `Start`,跑起来显示
+`Pause`。任何界面按 `q` 或 `Ctrl-C` 都能退出。程序内按 **`?`** 随时打开操作速查。
 
-### Normal mode (button bar)
+### 普通模式
 
-| Key | Action |
+| 输入 | 作用 |
 | --- | --- |
-| **drag** (left button) | pan the view (grab-and-drag) |
-| **mouse wheel** | zoom in / out, anchored on the cursor |
-| `+` / `-` | speed the simulation up / slow it down |
-| `c` | recentre the view on the pattern |
-| `f` | toggle follow mode (auto-recentre every generation) |
-| `j` | jump to a generation (see below) |
-| `x` | clear the world to a blank slate |
-| `s` / `l` | save / load a pattern file (RLE — see below) |
-| `Tab` or `Right` | move selection to the next button |
-| `Left` | move selection to the previous button |
-| `Space` or `Enter` | activate the selected button |
-| `q` / `Ctrl-C` | quit immediately |
+| **左键拖拽** | 平移视口(抓取式,光标下的点不动) |
+| **滚轮** | 以光标为锚缩放,每格 1 像素一档 |
+| `+` / `-` | 加速 / 减速(每按一次 ±10ms,0–2000ms) |
+| `c` | 视口回中到图案包围盒 |
+| `f` | 跟随模式:每代自动回中,盯着飞船飞 |
+| `x` | 清空世界为空白 |
+| `P N R E J S L ?` | 触发对应按钮 |
+| `Tab` / `←` `→` | 移动按钮选择 |
+| `Space` / `Enter` | 触发选中按钮 |
+| `q` / `Ctrl-C` | 退出 |
 
-- **Start** — begin, or resume from pause.
-- **Pause** — freeze the simulation (Start resumes from where it stopped).
-- **Step** — advance exactly one generation, then pause. Works from any
-  paused/reset state, so you can watch the simulation frame by frame.
-- **Reset** — reload the initial configuration (generation 0).
-- **Edit** — enter edit mode (see below).
-- **Jump** — jump to any generation, forward or back (see below).
+顶部状态栏悬浮在世界之上,显示运行状态(带颜色)、代数、相机坐标、存活数、
+缩放级别、帧延迟和跟随开关;Save/Load 的结果以右下角**自动消失的浮动通知**给出。
 
-The status line shows the state, generation, camera position `Cam: (x,y)`, the
-live-cell count, the current zoom (`Zoom: Npx`, pixels per cell), and whether
-follow mode is on.
+### 探索世界(平移、缩放、回中、跟随)
 
-### Exploring the world (pan, zoom, recenter, follow)
+终端显示的是无界世界的一个**视口**:
 
-The world is unbounded, so the terminal shows a **viewport** into it:
+- **拖拽**平移;**滚轮**缩放,梯子从每格 20px 一路到 1px(每档 1px),继续缩小
+  进入**亚像素缩放**——每个屏幕像素代表一块细胞(块内有活细胞即点亮),最多
+  1 像素 = 256 格。状态栏显示 `Zoom: Npx` 或 `Zoom: 1px=Nc`。
+- **`c`** 回中一次;**`f`** 每代自动回中(跟随)。
+- 加载图案时会自动**缩放适配**:小图案保持舒适的大格子,大图案自动缩到能一屏看全。
 
-- **Drag with the left button** to pan (the point under the cursor stays under
-  it).
-- **Mouse wheel** to zoom, anchored on the cursor — from chunky cells, down
-  through one pixel per cell, and further into **sub-pixel** zoom where each
-  screen pixel stands for a block of cells (a pixel lights if any cell in the
-  block is alive). Sub-pixel zoom lets a pattern far larger than the screen be
-  seen whole. The status line shows `Zoom: Npx` (N pixels per cell) or
-  `Zoom: 1px=Nc` (one pixel per N cells).
-- **`c`** recentres the view on the live cells' bounding box — handy when a
-  pattern has drifted off-screen.
-- **`f`** toggles **follow mode**, which recentres every generation so you can
-  watch a spaceship travel without it leaving the screen.
+### 编辑模式(事务式)
 
-### Edit mode
+按 **`E`** 进入。编辑是一个**事务**:进入时世界被快照,**Enter 应用**(你画的成为
+新的第 0 代重启配置),**Esc 丢弃**(完整恢复进入前的世界——即使中途清空过)。
 
-Draw or modify the configuration by hand. A blinking outline (a yellow border
-around the cell) marks the current cell; it flashes so you can still see whether
-that cell is alive or dead. The cursor roams the unbounded world with the arrow
-keys and the view follows it.
-
-| Key | Action |
+| 输入 | 作用 |
 | --- | --- |
-| arrow keys | move the cursor (the view follows) |
-| `Space` or `Enter` | toggle the cell under the cursor (alive/dead) |
-| `Tab` or `Esc` | leave edit mode |
+| **左键点击** | 切换该格生死 |
+| **左键拖拽** | 连续绘制(以起笔格的新状态为准,快速笔画不断线) |
+| **滚轮** | 缩放 |
+| 方向键 + `Space` | 键盘移动光标 / 切换光标格 |
+| `x` | 清空全部细胞(留在编辑模式,Esc 仍可恢复) |
+| `Enter` | **应用**:保留编辑,代数归零 |
+| `Esc` | **丢弃**:恢复进入前的世界 |
 
-On leaving, the edited world becomes the new restart configuration, so **Reset**
-returns to what you drew.
+底部按钮换成 **[ Apply ] [ Discard ] [ Clear ] [ Pan: on/off ]**。
+打开 **Pan** 后左键拖拽改为平移世界,方便把图案画到屏幕之外;闪烁的高亮方框
+标记键盘光标所在格。
 
-### Jump (rewind & fast-forward)
+### 跳转(回溯与快进)
 
-Press **`j`** (or the **Jump** button), type a target **generation**, and press
-`Enter` to leap there — forward or backward. `Esc` cancels the prompt.
+按 **`J`**,输入目标**代数**,回车跳过去——向前向后都行;`Esc` 取消。
+输入过程中滚轮和拖拽仍然可用,方便先把画面框好。
 
-- **Backward** works because recent generations are kept in a history ring, so a
-  rewind to a nearby generation is instant. A rewind further back than the ring
-  reaches replays from generation 0 (Conway's Life is irreversible — a previous
-  state can't be computed, only recalled or re-derived).
-- **Forward** fast-forwards by actually running the simulation; the progress is
-  shown and it stays interruptible throughout. During a jump, **`q` / `Ctrl-C`
-  quit the program immediately** and **`Esc`** aborts just the jump (input is
-  serviced continuously, so quit is honoured even mid-jump on a huge pattern).
-  Very long jumps on patterns whose population grows without bound (glider guns,
-  breeders) are still slow and memory-hungry — inherent to the current engine
-  (though the generation step is multi-core; see [Build](#build)) — which is why
-  the jump is interruptible.
+- **回溯**:最近的代保存在历史环里(容量 1024 代、内存预算 256 MB),范围内的
+  回溯**瞬时完成**;更远的回溯从第 0 代重放(生命游戏**不可逆**,前一代只能被
+  记住或重新推演)。
+- **快进**:真实运行模拟,显示进度,全程响应输入——**`q`/`Ctrl-C` 立即退出程序**,
+  **`Esc`** 只中止本次跳转。对人口无限增长的图案(滑翔机枪、繁殖器)跳很远仍会
+  变慢,这是当前引擎的固有限制,所以跳转设计为随时可中断。
 
-### Saving & loading patterns (RLE)
+### 保存与加载(RLE)
 
-Press **`s`** (or the **Save** button) and **`l`** (or **Load**) to open the
-save/load browser.
+按 **`S`** 保存、**`L`** 打开加载浏览器。所有对话框都支持鼠标:底部有
+**[ Save ] / [ Cancel ]** 等按钮,**点击框外**即取消。
 
-- **Save** — type a name and press `Enter`; `.rle` is added automatically and the
-  file is written to your saves folder. If the name already exists you are asked
-  to confirm the overwrite.
-- **Load** — a scrollable list of your saved patterns with **Name / Size /
-  Modified** columns. Move with the arrow keys (or the mouse wheel), press
-  `Enter` or click a row to load it, `d` to delete (with confirmation), and
-  `n`/`s`/`m` (or click a column header) to sort — press again to reverse. If the
-  current world isn't empty, loading asks before replacing it. To load a file
-  from anywhere else, press `/` (or click **[Type a path…]**) and type a path —
-  handy for patterns downloaded from the wiki.
+- **保存** —— 输入名字回车(自动补 `.rle`),重名会弹出 Yes/No 覆盖确认。
+- **加载** —— 可滚动列表,**名字 / 大小 / 修改时间**三列;方向键或滚轮移动,
+  回车或点击某行加载;`d` 删除(需确认);`n`/`s`/`m` 或点击表头排序,再按反序;
+  当前世界非空时加载前先确认替换。按 `/`(或点 **[Type a path…]**)可输入任意
+  路径,方便加载从 wiki 下载的文件。
 
-Saved patterns live in `$XDG_DATA_HOME/game-of-life/saves/` (usually
-`~/.local/share/game-of-life/saves/`), kept separate from your settings. The
-startup default pattern lives there too, as `default.rle`.
-
-The format is the community-standard **RLE** (the one Golly and
-[LifeWiki](https://conwaylife.com/wiki/) use). Loading centres the pattern and
-zooms to fit; saving writes every live cell of the current world. For example, a
-saved glider is:
+存档在 `$XDG_DATA_HOME/game-of-life/saves/`(通常 `~/.local/share/game-of-life/saves/`),
+与设置分开。格式是 Golly 与 [LifeWiki](https://conwaylife.com/wiki/) 通用的
+**RLE**;加载会居中并缩放适配,保存写出当前世界的全部活细胞。例如滑翔机:
 
 ```
 x = 3, y = 3, rule = B3/S23
 bo$2bo$3o!
 ```
 
-(The `.cells` format is still accepted for an explicit `-f`; RLE is the format
-for in-app save/load and the default pattern because it stays compact.)
+(经典 `.cells` 纯文本格式仍可用于 `-f` 显式加载。)
 
-### Sixel rendering
+## 渲染
 
-The board is drawn as a real **sixel** bitmap: each cell becomes a block of
-pixels, so the viewport is limited only by the terminal's **pixel** dimensions —
-it fills the whole window at any zoom. Zooming out past one pixel per cell enters
-sub-pixel zoom (a block of cells per pixel), so even a pattern much larger than
-the screen can be viewed whole.
+画面是真像素位图,视口只受终端**像素数**限制,任意缩放下都铺满窗口。
 
-Sixel support is detected at startup via a Device Attributes query. If your
-terminal supports sixel but is not detected, force detection on:
+- 启动时先探测 **Kitty 图形协议**(RGB 帧 → zlib 压缩 → base64,固定图像 id
+  原地替换,内存有界);不支持则回退 **Sixel**;两者皆无则报错退出。
+- 帧内容去重(不变的帧零开销)、输入合并(快速拖拽不积压)、同步输出
+  (清屏+重绘一次呈现,不闪屏)。
+
+环境变量可覆盖自动探测:
 
 ```sh
-GOL_SIXEL=1 game-of-life   # skip the query, assume sixel is available
+GOL_KITTY=1 game-of-life   # 强制使用 KGP(=0 禁用)
+GOL_SIXEL=1 game-of-life   # 强制认定支持 Sixel(=0 禁用)
 ```
 
-Setting `GOL_SIXEL=0` forces detection off, in which case the program will
-report that a sixel-capable terminal is required and exit.
+## 设置持久化
 
-## Settings persistence
+参数以 JSON 记在 `$XDG_CONFIG_HOME/game-of-life/settings.json`
+(通常 `~/.config/game-of-life/settings.json`):
 
-Parameters are remembered between runs in a JSON file:
-
-```
-$XDG_CONFIG_HOME/game-of-life/settings.json
-# or, if XDG_CONFIG_HOME is unset:
-~/.config/game-of-life/settings.json
-```
-
-- The effective settings — seed-region size, delay and density — are written to
-  this file on **every** run (creating it on the first run), so a configuration
-  always carries over to the next run.
-- Command-line options that map to a stored setting (size, delay, density) are
-  applied for the run **and** persisted, so an option you pass (e.g. `-w 50`)
-  becomes the remembered value next time. `-s`/`-f` are not stored.
-
-Example `settings.json`:
+- 生效中的设置——种子区域尺寸、帧延迟、密度——**每次运行**都会写回,
+  自动带到下次。
+- 对应存储设置的命令行选项(尺寸、延迟、密度)既对本次生效也会被记住;
+  `-s`/`-f` 不存储。
 
 ```json
 {
@@ -242,72 +208,47 @@ Example `settings.json`:
 }
 ```
 
-`width`/`height` size the seed region a random/loaded pattern starts in (the
-world itself is unbounded). `world`/`wrap` are always `2`/`false` now and kept
-only for backward compatibility with older versions.
+`width`/`height` 是随机/加载图案起始的种子区域大小(世界本身无界);
+`world`/`wrap` 恒为 `2`/`false`,仅为兼容旧版保留。
 
-## Options
+## 选项
 
-| Option | Description | Default |
+| 选项 | 说明 | 默认值 |
 | --- | --- | --- |
-| `-w, --width N` | Seed-region width in cells | 30 (or remembered) |
-| `-h, --height N` | Seed-region height in cells | 20 (or remembered) |
-| `-d, --delay MS` | Delay between generations (ms) | 120 |
-| `-p, --density F` | Random initial live-cell probability (0..1) | 0.25 |
-| `-s, --seed N` | Random seed (default: time-based) | — |
-| `-f, --file PATH` | Load initial config from a pattern file | default path |
+| `-w, --width N` | 种子区域宽度(格) | 30(或记住的值) |
+| `-h, --height N` | 种子区域高度(格) | 20(或记住的值) |
+| `-d, --delay MS` | 每代延迟(毫秒) | 120 |
+| `-p, --density F` | 随机开局存活概率(0..1) | 0.25 |
+| `-s, --seed N` | 随机种子 | 按时间 |
+| `-f, --file PATH` | 从图案文件加载开局 | 默认图案 |
 
-### Default pattern
+### 默认图案与内置图案
 
-If `-f` is not given, the program looks for a default pattern file at
-`~/.local/share/game-of-life/saves/default.rle` (respecting `XDG_DATA_HOME`). If
-that file exists it is loaded; otherwise the board falls back to a random start
-(density `-p`, default 0.25). An explicit `-f PATH` that cannot be read is a
-hard error, but a missing default file is not — it just triggers the random
-fallback.
+不带 `-f` 时加载 `~/.local/share/game-of-life/saves/default.rle`,缺失则随机开局
+(显式 `-f` 读不到才是硬错误)。想换默认图案,覆盖该文件即可——或在程序内直接以
+`default` 为名保存一次。
 
-`make install` puts a glider there as `default.rle`. To use a different default,
-overwrite it (or just save over it from inside the app with the name
-`default`), e.g.:
+安装会把 `saves/` 里的 **14 个经典图案**复制进你的存档目录,按 `L` 即见:
 
-```sh
-mkdir -p ~/.local/share/game-of-life/saves
-cp saves/pulsar.rle ~/.local/share/game-of-life/saves/default.rle
-```
-
-### Included patterns
-
-The `saves/` directory holds a set of classic Life patterns as `.rle`. **Install
-copies them into your saves folder**, so they show up straight away in the in-app
-**Load** browser (`l`). You can also load one at startup with
-`-f saves/<name>.rle`:
-
-| File | Type |
+| 文件 | 类型 |
 | --- | --- |
-| `default.rle` | Glider (installed as the auto-loaded default) |
-| `glider.rle` | Glider — spaceship, period 4 |
-| `lwss.rle` | Lightweight spaceship |
-| `blinker.rle` | Oscillator, period 2 |
-| `toad.rle` | Oscillator, period 2 |
-| `beacon.rle` | Oscillator, period 2 |
-| `pulsar.rle` | Oscillator, period 3 |
-| `pentadecathlon.rle` | Oscillator, period 15 |
-| `block.rle` | Still life |
-| `beehive.rle` | Still life |
-| `r-pentomino.rle` | Methuselah (stabilises after 1103 gens) |
-| `acorn.rle` | Methuselah (stabilises after 5206 gens) |
-| `diehard.rle` | Methuselah (vanishes after 130 gens) |
-| `glider-gun.rle` | Gosper glider gun |
+| `default.rle` | 滑翔机(自动加载的默认) |
+| `glider.rle` | 滑翔机——飞船,周期 4 |
+| `lwss.rle` | 轻量级飞船 |
+| `blinker.rle` / `toad.rle` / `beacon.rle` | 振荡器,周期 2 |
+| `pulsar.rle` | 振荡器,周期 3 |
+| `pentadecathlon.rle` | 振荡器,周期 15 |
+| `block.rle` / `beehive.rle` | 静物 |
+| `r-pentomino.rle` | 玛土撒拉(1103 代后稳定) |
+| `acorn.rle` | 玛土撒拉(5206 代后稳定) |
+| `diehard.rle` | 玛土撒拉(130 代后消失) |
+| `glider-gun.rle` | 高斯帕滑翔机枪 |
 
-## Pattern formats
+## 图案格式
 
-The interchange format throughout is the community-standard **RLE** (`saves/` and
-the in-app Save/Load). The classic `.cells` plaintext format is still accepted for
-an explicit `-f name.cells` if you have one:
-
-- Lines beginning with `!` or `#` are comments.
-- In pattern lines, `.` or space is a dead cell; any other character
-  (typically `O`) is a live cell.
+通用交换格式为 **RLE**(内置图案与程序内存取)。经典 `.cells` 纯文本仍可
+`-f name.cells` 显式加载:`!`/`#` 开头是注释,`.` 或空格为死,其余字符
+(通常 `O`)为活。
 
 ```
 ! Glider
@@ -316,7 +257,6 @@ an explicit `-f name.cells` if you have one:
 OOO
 ```
 
-## License
+## 许可证
 
-This program is free software, licensed under the GNU General Public License
-version 3 (GPLv3). See the [LICENSE](LICENSE) file for the full text.
+自由软件,GNU 通用公共许可证第 3 版(GPLv3)。全文见 [LICENSE](LICENSE)。
