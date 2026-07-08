@@ -61,6 +61,11 @@
 #define SIXEL_UI_ROWS 6   /* char rows reserved below the image for the UI */
 #define SIXEL_CELL_MAX 20 /* max pixels per cell (keeps small views sane) */
 
+/* Below this many rows the image area is too small to be useful; the minimum
+   usable width is derived at runtime from the compact button bar (see render) so
+   the world is only drawn when even the narrow bar fits. */
+#define MIN_USABLE_ROWS 8
+
 /* Pixels per cell for the viewport in sixel mode. The viewport is sized so cells
    render around this size; the mouse wheel changes it to zoom (smaller = more
    cells visible). INFINITE_CELL_PX is the default. */
@@ -132,6 +137,14 @@ typedef enum {
 static const char *const BUTTON_LABELS[BTN_COUNT] = {
     " Play/Pause (P) ", " Step (N) ", " Reset (R) ", " Edit (E) ", " Jump (J) ",
     " Save (S) ", " Load (L) ", " Help (?) ", " Quit (Q) "};
+
+/* Compact labels (no " (X)" shortcut suffix, no surrounding pad) used when the
+   full bar would overflow the terminal width. Parallel to BUTTON_LABELS; the
+   renderer, the geometry/hit-test, and the click-flash all pick the same array
+   from the current width (see bar_labels), so they never disagree within a frame. */
+static const char *const BUTTON_LABELS_SHORT[BTN_COUNT] = {
+    "Play/Pause", "Step", "Reset", "Edit", "Jump",
+    "Save", "Load", "Help", "Quit"};
 
 typedef struct {
     UiMode mode;
@@ -248,6 +261,20 @@ static void on_term(int sig) {
     (void)r;
     terminal_restore();
     _Exit(128 + sig);
+}
+
+/* Restore the terminal on a crash (SIGSEGV/SIGABRT/…), then re-raise the signal
+   with the default disposition so the process still crashes "properly" (correct
+   exit status / core dump) — but from a sane terminal instead of one stuck in raw
+   mode + alt screen with the cursor hidden. atexit() does NOT run for a
+   signal-killed process, so without this a crash wrecks the user's terminal.
+   write()/signal()/raise() are all async-signal-safe. */
+static void on_crash(int sig) {
+    ssize_t r = write(STDOUT_FILENO, ANSI_SHOW_CURSOR, sizeof(ANSI_SHOW_CURSOR) - 1);
+    (void)r;
+    terminal_restore();
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
 /* Clamp a dimension into the supported range. */
@@ -457,16 +484,23 @@ static void build_status(const App *app, char *buf, size_t cap) {
     }
 }
 
-/* Total printed width of the button bar: each "[label]" is strlen+2 wide, joined
-   by single spaces. Shared by the renderer and the mouse hit-test so they agree
-   on where the (centred) bar lands. */
-static int button_bar_width(void) {
+/* Total printed width of a button bar drawn from `labels`: each "[label]" is
+   strlen+2 wide, joined by single spaces. */
+static int labels_bar_width(const char *const *labels) {
     int w = 0;
     for (int b = 0; b < BTN_COUNT; b++) {
-        w += (int)strlen(BUTTON_LABELS[b]) + 2;
+        w += (int)strlen(labels[b]) + 2;
         if (b) w += 1; /* separator space */
     }
     return w;
+}
+
+/* Pick the label set that fits `cols`: the full labels (with shortcut hints) when
+   the bar fits, otherwise the compact set so it never overflows a narrow window.
+   Every renderer/hit-test calls this with the current width, so they agree. */
+static const char *const *bar_labels(int cols) {
+    return labels_bar_width(BUTTON_LABELS) <= cols ? BUTTON_LABELS
+                                                   : BUTTON_LABELS_SHORT;
 }
 
 /* The controls that sit *below* the world image: a centred button bar and, one
@@ -478,8 +512,10 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
                             int img_rows, int cols) {
     appendf(buf, cap, n, ANSI_CLR_BELOW);
 
-    /* Button bar, centred on the row one blank line below the image. */
-    int bleft = (cols - button_bar_width()) / 2; if (bleft < 0) bleft = 0;
+    /* Button bar, centred on the row one blank line below the image. Labels shrink
+       to their compact form when the full bar would not fit the width. */
+    const char *const *labels = bar_labels(cols);
+    int bleft = (cols - labels_bar_width(labels)) / 2; if (bleft < 0) bleft = 0;
     appendf(buf, cap, n, "\033[%d;%dH", img_rows + 2, bleft + 1);
     /* Highlight the selected button in world view (Normal) and while its own modal
        mode is active (Edit/Jump) — a click that entered that mode should not make
@@ -489,9 +525,9 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
     for (int b = 0; b < BTN_COUNT; b++) {
         if (b) appendf(buf, cap, n, " ");
         if (show_sel && b == app->selected) {
-            appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, BUTTON_LABELS[b]);
+            appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, labels[b]);
         } else {
-            appendf(buf, cap, n, "[%s]", BUTTON_LABELS[b]);
+            appendf(buf, cap, n, "[%s]", labels[b]);
         }
     }
 
@@ -513,8 +549,10 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
         snprintf(hint, sizeof(hint), "Drag pan  Wheel zoom  +/- speed  "
                  "c center  f follow  x clear   |   Tab select  Space activate");
     }
-    int hleft = (cols - (int)strlen(hint)) / 2; if (hleft < 0) hleft = 0;
-    appendf(buf, cap, n, "\033[%d;%dH%s", img_rows + 4, hleft + 1, hint);
+    /* Truncate to the width so a long hint never overflows a narrow terminal. */
+    int hvis = (int)strlen(hint); if (hvis > cols) hvis = cols;
+    int hleft = (cols - hvis) / 2; if (hleft < 0) hleft = 0;
+    appendf(buf, cap, n, "\033[%d;%dH%.*s", img_rows + 4, hleft + 1, hvis, hint);
 }
 
 /* FNV-1a hash of a byte buffer, used to detect whether the rendered image is
@@ -536,9 +574,10 @@ static uint64_t fnv1a(const char *data, size_t len) {
    spaces. */
 static void compute_button_geometry(App *app, int img_rows, int cols) {
     app->bar_row = img_rows + 1;
-    int col = (cols - button_bar_width()) / 2; if (col < 0) col = 0;
+    const char *const *labels = bar_labels(cols);
+    int col = (cols - labels_bar_width(labels)) / 2; if (col < 0) col = 0;
     for (int b = 0; b < BTN_COUNT; b++) {
-        int w = (int)strlen(BUTTON_LABELS[b]) + 2; /* the bracketed "[label]" */
+        int w = (int)strlen(labels[b]) + 2; /* the bracketed "[label]" */
         app->btn_col0[b] = col;
         app->btn_col1[b] = col + w;
         col += w + 1; /* + separator space */
@@ -557,15 +596,16 @@ static void flash_selected_button(const App *app) {
     int cols, rows;
     if (!terminal_size(&cols, &rows)) return;
     char buf[1024]; size_t n = 0;
-    int bleft = (cols - button_bar_width()) / 2; if (bleft < 0) bleft = 0;
+    const char *const *labels = bar_labels(cols);
+    int bleft = (cols - labels_bar_width(labels)) / 2; if (bleft < 0) bleft = 0;
     /* Position at the bar row (1-based = bar_row+1) and reset any stale SGR. */
     appendf(buf, sizeof(buf), &n, ANSI_RESET "\033[%d;%dH", app->bar_row + 1, bleft + 1);
     for (int b = 0; b < BTN_COUNT; b++) {
         if (b) appendf(buf, sizeof(buf), &n, " ");
         if (b == app->selected)
-            appendf(buf, sizeof(buf), &n, ANSI_REVERSE "[%s]" ANSI_RESET, BUTTON_LABELS[b]);
+            appendf(buf, sizeof(buf), &n, ANSI_REVERSE "[%s]" ANSI_RESET, labels[b]);
         else
-            appendf(buf, sizeof(buf), &n, "[%s]", BUTTON_LABELS[b]);
+            appendf(buf, sizeof(buf), &n, "[%s]", labels[b]);
     }
     fwrite(buf, 1, n, stdout);
     fflush(stdout);
@@ -895,6 +935,25 @@ static void render_dialog(App *app) {
     app->sx_last_w = app->sx_last_h = -1;
 }
 
+/* Draw a clean centred "terminal too small" notice on the alt screen, so a window
+   too small for the world + controls shows guidance instead of a clipped mess or a
+   stale frame. Forces a full repaint on the way back to a usable size. */
+static void render_too_small(App *app, int cols, int rows, int min_cols) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Terminal too small (need %dx%d)",
+             min_cols, MIN_USABLE_ROWS);
+    int len = (int)strlen(msg);
+    int col = (cols - len) / 2 + 1; if (col < 1) col = 1;
+    int row = rows / 2 + 1;         if (row < 1) row = 1;
+    char buf[128];
+    size_t n = 0;
+    appendf(buf, sizeof(buf), &n, ANSI_CLEAR "\033[%d;%dH%.*s", row, col, cols, msg);
+    fwrite(buf, 1, n, stdout);
+    fflush(stdout);
+    app->sx_drawn = false;
+    app->sx_last_w = app->sx_last_h = -1;
+}
+
 /* Render the world: build the image straight from the sparse live-cell set,
    plotting only the O(population) cells that fall inside the viewport instead of
    probing every one of its (up to millions of) cells. Returns false if the
@@ -907,7 +966,16 @@ static bool render(App *app) {
         return true;
     }
     int cols, rows, xpx, ypx;
-    if (!terminal_size(&cols, &rows) || !terminal_pixel_size(&xpx, &ypx)) {
+    if (!terminal_size(&cols, &rows)) {
+        return false;
+    }
+    /* Draw the world only when even the compact button bar fits the width. */
+    const int min_cols = labels_bar_width(BUTTON_LABELS_SHORT);
+    if (cols < min_cols || rows < MIN_USABLE_ROWS) {
+        render_too_small(app, cols, rows, min_cols);
+        return true;
+    }
+    if (!terminal_pixel_size(&xpx, &ypx)) {
         return false;
     }
     const int cch = ypx / rows;
@@ -1959,6 +2027,14 @@ static void handle_help(App *app, Key key) {
         app->running = false;
         return;
     }
+    if (key == KEY_MOUSE) {
+        /* Dismiss only on a fresh left-button *press*. Help is opened by a click,
+           so the matching button *release* arrives while we are already in UI_HELP
+           — treating that (or motion/wheel) as a dismiss would close Help the
+           instant it opened. Ignore everything but a real press. */
+        MouseEvent m = terminal_mouse();
+        if (!(m.button == 0 && m.pressed && !m.motion)) return;
+    }
     app->mode = UI_NORMAL;
     /* The world was covered by the box; force a repaint to erase it. */
     app->sx_drawn = false;
@@ -2113,6 +2189,14 @@ int main(int argc, char **argv) {
     struct sigaction sa_winch = {0};
     sa_winch.sa_handler = on_winch;
     sigaction(SIGWINCH, &sa_winch, NULL);
+    /* Restore the terminal on a crash too (atexit does not run for these). */
+    struct sigaction sa_crash = {0};
+    sa_crash.sa_handler = on_crash;
+    sigaction(SIGSEGV, &sa_crash, NULL);
+    sigaction(SIGABRT, &sa_crash, NULL);
+    sigaction(SIGBUS, &sa_crash, NULL);
+    sigaction(SIGILL, &sa_crash, NULL);
+    sigaction(SIGFPE, &sa_crash, NULL);
 
     /* Seed the world. RLE loads (an explicit `-f *.rle`, or the startup default
        saves/default.rle) go straight into the sparse engine — no dense board, so
