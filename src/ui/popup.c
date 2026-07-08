@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L /* clock_gettime, CLOCK_MONOTONIC */
 
-#include "popup.h"
+#include "ui/popup.h"
 
 #include <stdarg.h>
 #include <stdio.h>

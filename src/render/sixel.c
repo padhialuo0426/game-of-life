@@ -1,4 +1,4 @@
-#include "sixel.h"
+#include "render/sixel.h"
 
 #include <stdio.h>
 #include <stdlib.h>

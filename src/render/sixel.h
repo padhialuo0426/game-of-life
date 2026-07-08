@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "board.h"
+#include "core/board.h"
 
 /* Encode `board` as a sixel graphics image. Each cell is drawn as a
    cell_px x cell_px block of pixels (so the world's size is decoupled from the

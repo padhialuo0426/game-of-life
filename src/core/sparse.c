@@ -1,4 +1,4 @@
-#include "sparse.h"
+#include "core/sparse.h"
 
 #include <limits.h>
 #include <stdint.h>

@@ -1,7 +1,7 @@
 #ifndef GAME_OF_LIFE_CONFIG_H
 #define GAME_OF_LIFE_CONFIG_H
 
-#include "board.h"
+#include "core/board.h"
 
 /* Load an initial configuration from a plaintext pattern file into `board`.
 

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "engine.h"
+#include "core/engine.h"
 
 /* A bounded ring of engine snapshots tagged by generation, giving cheap rewind
    to a recent generation without recomputing. It retains the most recent

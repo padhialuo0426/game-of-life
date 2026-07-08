@@ -1,6 +1,6 @@
 #define _DEFAULT_SOURCE /* termios, poll, ioctl/TIOCGWINSZ, struct winsize */
 
-#include "terminal.h"
+#include "ui/terminal.h"
 
 #include <poll.h>
 #include <stdio.h>

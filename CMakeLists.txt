@@ -21,19 +21,24 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
         CACHE PATH "Install prefix (default: user-local)" FORCE)
 endif()
 
+# Sources are grouped by responsibility:
+#   src/core    — the world model (engine seam, sparse world, history, seed board)
+#   src/render  — pixel-graphics encoders (Kitty Graphics Protocol, sixel)
+#   src/io      — file formats + persistence (RLE, .cells, settings)
+#   src/ui      — the terminal app (main loop, raw-mode terminal, popup toast)
 add_executable(game-of-life
-    src/main.c
-    src/board.c
-    src/config.c
-    src/engine.c
-    src/history.c
-    src/kitty.c
-    src/popup.c
-    src/rle.c
-    src/settings.c
-    src/sixel.c
-    src/sparse.c
-    src/terminal.c)
+    src/core/board.c
+    src/core/engine.c
+    src/core/history.c
+    src/core/sparse.c
+    src/io/config.c
+    src/io/rle.c
+    src/io/settings.c
+    src/render/kitty.c
+    src/render/sixel.c
+    src/ui/main.c
+    src/ui/popup.c
+    src/ui/terminal.c)
 
 target_include_directories(game-of-life PRIVATE src)
 
@@ -52,21 +57,6 @@ endif()
 find_package(ZLIB REQUIRED)
 target_link_libraries(game-of-life PRIVATE ZLIB::ZLIB)
 message(STATUS "ZLIB found: KGP canvas enabled")
-
-# ---- Test: KGP canvas + sixel fallback -------------------------------------
-enable_testing()
-add_executable(test-kitty
-    tests/test_kitty.c
-    src/kitty.c
-    src/sixel.c
-    src/board.c)
-target_include_directories(test-kitty PRIVATE src)
-target_link_libraries(test-kitty PRIVATE ZLIB::ZLIB)
-target_compile_options(test-kitty PRIVATE
-    -Wall -Wextra -Wpedantic
-    $<$<CONFIG:Debug>:-g -O0>
-    $<$<CONFIG:Release>:-O2 -DNDEBUG>)
-add_test(NAME kitty-canvas COMMAND test-kitty)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(game-of-life PRIVATE

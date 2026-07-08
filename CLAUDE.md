@@ -38,52 +38,112 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Source layout
 
-- `src/engine.{c,h}` — **the engine seam.** Opaque `LifeEngine` + `EngineSnapshot`
+Sources are grouped by responsibility (all `#include`s are subdir-qualified,
+e.g. `#include "core/engine.h"`; the single include root is `src/`). There is
+no `tests/` directory any more (removed 2026-07-08 at the user's request along
+with its CMake target; it can be recovered from git history if wanted).
+
+`src/core/` — the world model:
+- `engine.{c,h}` — **the engine seam.** Opaque `LifeEngine` + `EngineSnapshot`
   wrapping the sparse backend today; this is the interface a future Hashlife
   backend implements. The two "ENGINE SEAM" ops are `engine_advance(n)` (Hashlife
   would leap in ~O(log n)) and `engine_snapshot`/`engine_restore` (Hashlife would
   store a canonical quadtree node id). main.c/history.c talk only to `engine_*`.
-- `src/history.{c,h}` — bounded ring (HISTORY_CAP=1024) of `EngineSnapshot`s
+- `history.{c,h}` — bounded ring (HISTORY_CAP=1024) of `EngineSnapshot`s
   tagged by generation, for instant rewind. Direct-mapped (`gen % cap`), with
   branch-detection: recording a non-contiguous gen clears the ring (timeline
-  changed). `history_floor(gen)` finds the nearest replay base.
-- `src/popup.{c,h}` — a transient "toast": a `Popup` (text + monotonic stamp +
-  active flag) that floats over the world for `POPUP_TTL_MS` (5s) then auto-hides.
-  `popup_show`/`popup_visible`/`popup_expire`/`popup_remaining_ms`/`popup_clear`.
-  Used for Save/Load results (main.c draws it bottom-right over the world image;
-  the main loop wakes on `popup_remaining_ms` to hide an idle one).
-- `src/rle.{c,h}` — read/write the community-standard RLE pattern format
-  (`rle_load` → malloc'd (x,y) array; `rle_save` from an (x,y) array). Used by the
-  `s`/`l` file prompt. Engine-independent.
-- `src/sparse.{c,h}` — the current world engine behind `engine.c`: open-addressing
+  changed). `history_floor(gen)` finds the nearest replay base. Also bounded by
+  a **byte budget** (256 MB, `HISTORY_BUDGET_BYTES`): over budget the oldest
+  snapshots are freed first (newest always kept), so a huge world can't run the
+  process out of memory.
+- `sparse.{c,h}` — the current world engine behind `engine.c`: open-addressing
   hash set of live cells (SplitMix64 hash, backward-shift deletion). `sparse_step`
   dispatches to a serial reference (`sparse_step_serial`) or, for worlds ≥20000
   cells with OpenMP, a lock-free multi-core stepper (`sparse_step_parallel`,
   y-band partitioning — see the changes note); both give identical results.
   `sparse_query(x0,y0,x1,y1,fn)` iterates the live cells in a rectangle (render +
   snapshot).
-- `src/sixel.{c,h}` — sixel bitmap encoder. Incremental `SixelCanvas`
+- `board.{c,h}` — dense `Board`, now used only as a transient seed buffer to
+  lay out the initial random/`.cells` pattern before handing it to the sparse
+  world (`seed_from_board`). Not on the render/step hot path any more.
+
+`src/render/` — pixel-graphics encoders:
+- `sixel.{c,h}` — sixel bitmap encoder. Incremental `SixelCanvas`
   (`new/set_alive/set_cursor/encode/free`) plotted straight from the live-cell set;
   `sixel_render_board` is a thin Board wrapper on top. Palette: dead/alive/grid/cursor.
-- `src/kitty.{c,h}` — Kitty Graphics Protocol encoder, parallel API to the sixel
+- `kitty.{c,h}` — Kitty Graphics Protocol encoder, parallel API to the sixel
   canvas (RGB pixel buffer → zlib-compress → base64 → KGP APC sequence). Auto-
   detected at startup; fallback to sixel when the terminal does not support KGP.
   Depends on zlib (system, `find_package(ZLIB)`).
-- `src/board.{c,h}` — dense `Board`, now used only as a transient seed buffer to
-  lay out the initial random/`.cells` pattern before handing it to the sparse
-  world (`seed_from_board`). Not on the render/step hot path any more.
-- `src/terminal.{c,h}` — raw mode, key + SGR-mouse decoding, sixel detection
-  (Primary DA query), alt-screen + mouse enable/disable.
-- `src/config.{c,h}` — load `.cells` plaintext patterns (centered into a board).
-- `src/settings.{c,h}` — JSON-ish persisted settings in `$XDG_CONFIG_HOME/game-of-life/
+
+`src/io/` — file formats + persistence:
+- `rle.{c,h}` — read/write the community-standard RLE pattern format
+  (`rle_load` → malloc'd (x,y) array; `rle_save` from an (x,y) array). Used by the
+  `s`/`l` file prompt. Engine-independent. Hardened against corrupt/hostile
+  files (run-length / total-cell / pen-coordinate caps).
+- `config.{c,h}` — load `.cells` plaintext patterns (centered into a board).
+- `settings.{c,h}` — JSON-ish persisted settings in `$XDG_CONFIG_HOME/game-of-life/
   settings.json`, plus dir helpers: `settings_config_dir` (config),
   `settings_data_dir`/`settings_saves_dir` (user data — saved patterns), `settings_mkdirs`.
-- `src/main.c` — UI state machine (Normal/Edit/Jump + Save/Load/Confirm/Help dialogs),
+
+`src/ui/` — the terminal app:
+- `main.c` — UI state machine (Normal/Edit/Jump + Save/Load/Confirm/Help dialogs),
   render loop (world image + `render_dialog` for the full-screen browsers), input
   handling, mouse pan/zoom + clickable button bar and dialog rows, recenter/follow.
+- `terminal.{c,h}` — raw mode, key + SGR-mouse decoding, sixel detection
+  (Primary DA query), alt-screen + mouse enable/disable.
+- `popup.{c,h}` — a transient "toast": a `Popup` (text + monotonic stamp +
+  active flag) that floats over the world for `POPUP_TTL_MS` (5s) then auto-hides.
+  `popup_show`/`popup_visible`/`popup_expire`/`popup_remaining_ms`/`popup_clear`.
+  Used for Save/Load results (main.c draws it bottom-right over the world image;
+  the main loop wakes on `popup_remaining_ms` to hide an idle one).
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Reorganise `src/` into `core/ render/ io/ ui/`; drop `tests/`.**
+  Sources are now grouped by responsibility (see "Source layout"); all local
+  includes are subdir-qualified (`#include "core/engine.h"`), include root stays
+  `src/`. At the user's request the `tests/` directory and its CMake target
+  (`test-kitty`, `enable_testing`/`add_test`) were **deleted** — recover from git
+  history if ever wanted. Verified: clean-from-scratch release + debug builds,
+  zero warnings; PTY smoke (KGP zoom no-2J, sixel clear-on-resize, dialog
+  open/close) passes; installed.
+- **(Fedora) Full-project review fixes (memory + input edges).** From a
+  whole-codebase audit (memory safety + interaction logic), all found issues
+  fixed in one pass:
+  - **History ring byte budget.** The ring held up to 1024 full-world snapshots
+    with no total-size bound — ~12 GB RSS on a 1.5M-cell world. `history_new`
+    now takes a byte budget (256 MB via `HISTORY_BUDGET_BYTES`); over budget the
+    oldest snapshots are freed first, the newest is always kept, deep rewinds
+    replay from gen 0 instead of recalling.
+  - **RLE loader hardened.** A corrupt/hostile file could hang the program
+    (`5000000000o` looped billions of times), overflow `long` run accumulation,
+    or wrap the pen coordinates (signed-overflow UB). Runs are now capped at
+    10M, total cells at 10M, pen coords at 2^30 — over any cap the file is
+    rejected cleanly ("not a valid RLE pattern").
+  - **Edit OOM guard.** If the entry snapshot allocation failed, Esc/Discard
+    would `engine_restore(NULL)` — i.e. *clear* the world. BTN_EDIT now refuses
+    to enter Edit when the snapshot fails (popup explains), and `discard_edit`
+    guards NULL.
+  - **CSI tails no longer leak into text fields.** `decode_escape` only
+    understood arrows + SGR mouse; Delete (`ESC [ 3 ~`) / modified arrows
+    (`ESC [ 1 ; 5 C`) left their tail bytes to be read as literal characters
+    (typed into the Save-name/path fields). Unrecognised CSI sequences are now
+    consumed through their final byte.
+  - **settings.json delay clamp** (hand-edited huge value truncated through
+    `(int)`, possibly negative → poll blocks forever): clamped to the same
+    1-hour cap as the CLI.
+  - **Parallel-stepper OOM leak**: the per-thread `counts` map leaked when the
+    result-set allocation failed.
+  - **KGP cursor save/restore made exact.** `cursor_restore` replayed the
+    *estimated* pixel count while the save pass wrote fewer entries (stricter
+    clipping) — reading uninitialised offsets (segfault at small `cell_px`,
+    canvas corruption otherwise). The actual saved count is now stored, and
+    overlap guards prevent double-saving when `cell_px <= 4`.
+- **(Fedora) Erase the expired toast on KGP.** Follow-up to the no-ED2 change:
+  the toast's text cells were never erased on the KGP path (the image sits
+  behind text), so an expired Save/Load toast stayed on screen forever. Popup
+  expiry now sets `text_dirty` for the per-row EL erase.
 - **(Fedora) Fix the remaining zoom flash on KGP: never ED-2 on the KGP path.**
   Frame-by-frame analysis of a 60 fps screen recording (Konsole) showed the
   flash frame had HUD + buttons but **no world image**: on a zoom notch the

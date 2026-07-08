@@ -1,6 +1,6 @@
 #define _DEFAULT_SOURCE
 
-#include "kitty.h"
+#include "render/kitty.h"
 
 #include <stdbool.h>
 #include <stdint.h>

@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L /* mkdir, getenv semantics */
 
-#include "settings.h"
+#include "io/settings.h"
 
 #include <errno.h>
 #include <stdio.h>

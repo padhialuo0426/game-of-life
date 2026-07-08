@@ -1,15 +1,15 @@
 #define _DEFAULT_SOURCE /* sigaction, SIGWINCH */
 
-#include "board.h"
-#include "config.h"
-#include "engine.h"
-#include "history.h"
-#include "kitty.h"
-#include "popup.h"
-#include "rle.h"
-#include "settings.h"
-#include "sixel.h"
-#include "terminal.h"
+#include "core/board.h"
+#include "io/config.h"
+#include "core/engine.h"
+#include "core/history.h"
+#include "render/kitty.h"
+#include "ui/popup.h"
+#include "io/rle.h"
+#include "io/settings.h"
+#include "render/sixel.h"
+#include "ui/terminal.h"
 
 #include <dirent.h>
 #include <limits.h>

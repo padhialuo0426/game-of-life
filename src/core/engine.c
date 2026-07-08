@@ -1,6 +1,6 @@
-#include "engine.h"
+#include "core/engine.h"
 
-#include "sparse.h"
+#include "core/sparse.h"
 
 #include <limits.h>
 #include <stdint.h>
