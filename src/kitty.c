@@ -9,9 +9,14 @@
 #include <string.h>
 #include <zlib.h>
 
-/* Fixed KGP image + placement id reused every frame. Reusing one id (and
-   deleting it before each transmit) means the terminal replaces the image in
-   place instead of accumulating one per frame — see kitty_canvas_encode. */
+/* Fixed KGP image + placement id reused every frame. Per the protocol,
+   transmitting under an id that is already in use *replaces* that image (the
+   old data is freed) and re-creating placement (i,p) replaces the old
+   placement — an atomic swap, so memory stays bounded at one frame and the
+   background never shows through between frames. Do NOT delete the previous
+   image before transmitting instead: that leaves the graphics layer empty
+   while the new payload decodes, strobing the background on every frame of a
+   running simulation (a photosensitivity hazard). */
 #define KGP_IMAGE_ID 1
 
 /* ---- pixel colours ----------------------------------------------------- */
@@ -297,20 +302,16 @@ char *kitty_canvas_encode(KittyCanvas *c, size_t *out_len) {
 
     /* Build the KGP escape sequence (Kitty Graphics Protocol).
 
-       Memory bounding: we reuse a single fixed image id (KGP_IMAGE_ID) and
-       placement id every frame, and *delete the previous frame's image first*
-       (a=d,d=i,i=<id>). Without this the terminal allocates a fresh image +
-       placement per frame and never frees them — on a running simulation that
-       grows without bound (observed ~22 GB in Ghostty). The delete + transmit go
-       out in one write, so the terminal composites them together with no flash.
+       Memory bounding without flashing: we transmit every frame under the same
+       fixed image id + placement id (KGP_IMAGE_ID). Reusing an in-use id makes
+       the terminal replace that image's data (freeing the old frame) and
+       re-creating placement (i,p) replaces the old placement — one atomic swap,
+       so a running simulation holds exactly one image (an anonymous a=T per
+       frame instead grew without bound, observed ~22 GB in Ghostty). No
+       explicit delete of the previous frame: a delete-then-transmit leaves the
+       graphics layer empty while the payload decodes, which flashed the
+       background on every generation.
 
-       The delete comes first:
-       \033_G  a=d  action: delete
-               d=i,i=<id> delete the image with this id and its placements
-               q=2  suppress the terminal's OK/error acknowledgment
-       \033\   ST
-
-       Then the transmit + display:
        \033_G  a=T  action: transmit + display
                f=24 24-bit RGB, 8 bits per channel, no alpha
                s=<pw>,v=<ph> pixel dimensions
@@ -324,9 +325,8 @@ char *kitty_canvas_encode(KittyCanvas *c, size_t *out_len) {
        \033\   ST (string terminator, two bytes) */
     char hdr[256];
     int hl = snprintf(hdr, sizeof(hdr),
-                      "\033_Ga=d,d=i,i=%d,q=2\033\\"
                       "\033_Ga=T,f=24,s=%d,v=%d,o=z,z=-1,C=1,i=%d,p=%d,q=2;",
-                      KGP_IMAGE_ID, c->pw, c->ph, KGP_IMAGE_ID, KGP_IMAGE_ID);
+                      c->pw, c->ph, KGP_IMAGE_ID, KGP_IMAGE_ID);
 
     /* KGP string terminator is ESC \ (two bytes). */
     size_t total = (size_t)hl + b64_len + 2;

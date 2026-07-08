@@ -84,6 +84,19 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Fix per-frame KGP background flash: replace in place, don't
+  delete-then-transmit.** The KGP memory fix (2dee5f1) prepended an explicit
+  delete (`a=d,d=i`) before every transmit; between the delete and the new
+  payload being decoded the graphics layer is *empty*, so the terminal
+  background flashed through on every image change — every generation while
+  running, every Edit-cursor blink (mode-2026 sync doesn't gate Ghostty's
+  graphics ops, so the previous commit didn't cover this). The delete is gone:
+  transmitting under the same fixed image id + placement id already makes the
+  terminal replace the image data (old frame freed) and placement atomically —
+  memory stays bounded at one image, per the protocol's id-reuse semantics,
+  with no empty gap. `test-kitty` now asserts fixed `i=1`/`p=1`, `q=2`, and
+  **no `a=d`** in the encoded frame. PTY-verified: 30 frames across running sim
+  + Edit blink, each a single `a=T,i=1,p=1`, zero deletes.
 - **(Fedora) Kill the white flash on forced repaints (synchronized output).**
   Every "clear the screen, then redraw" path used to hand the terminal the clear
   and the new frame as separate writes, so the blank background was *presented*
