@@ -7,10 +7,12 @@ especially from another machine. The Git repo is the single source of truth:
 ## What this project is
 
 An interactive Conway's Game of Life for the terminal, written in C11, built with
-CMake. **Rendering is sixel-only** (real pixels, no text/character fallback), so
-it **requires a sixel-capable terminal** (iTerm2, Konsole, WezTerm, foot,
-`xterm -ti vt340`, …). The default macOS Terminal.app is NOT supported and the
-program exits with a message on startup if sixel isn't detected.
+CMake. **Rendering uses real-pixel graphics** (no text/character fallback) via
+the **Kitty Graphics Protocol** (preferred, auto-detected) with a **sixel
+fallback**. Requires a KGP-capable terminal (Kitty, Ghostty, WezTerm, Konsole
+≥ 24.08) or a sixel-capable terminal (iTerm2, Konsole, WezTerm, foot,
+`xterm -ti vt340`). The default macOS Terminal.app is NOT supported and the
+program exits with a message on startup if neither protocol is available.
 
 **Single world type: an unbounded ("infinite") sandbox** — a sparse hash-set of
 live cells with a pannable/zoomable viewport. There is no Finite or Toroidal
@@ -63,6 +65,10 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 - `src/sixel.{c,h}` — sixel bitmap encoder. Incremental `SixelCanvas`
   (`new/set_alive/set_cursor/encode/free`) plotted straight from the live-cell set;
   `sixel_render_board` is a thin Board wrapper on top. Palette: dead/alive/grid/cursor.
+- `src/kitty.{c,h}` — Kitty Graphics Protocol encoder, parallel API to the sixel
+  canvas (RGB pixel buffer → zlib-compress → base64 → KGP APC sequence). Auto-
+  detected at startup; fallback to sixel when the terminal does not support KGP.
+  Depends on zlib (system, `find_package(ZLIB)`).
 - `src/board.{c,h}` — dense `Board`, now used only as a transient seed buffer to
   lay out the initial random/`.cells` pattern before handing it to the sparse
   world (`seed_from_board`). Not on the render/step hot path any more.
@@ -78,6 +84,22 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Mac, Ghostty) Add Kitty Graphics Protocol (KGP) canvas with sixel fallback.**
+  New `src/kitty.{c,h}` parallel to the sixel canvas: RGB pixel buffer → grid
+  lines pre-drawn → live cells fill white cells → at encode-time cursor outline
+  drawn temporarily, zlib-compressed (best), base64-encoded → KGP APC sequence
+  `\033_Ga=T,f=24,s=W,v=H,o=z,z=-1,C=1;<b64>\033\\`. Auto-detected at startup
+  via `terminal_query_kitty()` (sends `\033_Gi=1,a=q;\033\\`, looks for "OK" in
+  the reply, accepts both `\033\\` and 8-bit `0x9c` terminators; `GOL_KITTY` env
+  var overrides). Prefers KGP, falls back to sixel, exits with a message if
+  neither is available. `render()` dispatches the canvas via `void *canvas` +
+  function pointer; `render_dialog()` clears the screen before drawing so the
+  box is opaque over the KGP layer. Overlay backgrounds use truecolor black
+  (`\033[48;2;0;0;0;37m`) because KGP terminals may render ANSI palette black
+  as partially transparent over the graphics layer. Unit-tested (`tests/test_kitty.c`);
+  confirmed working on Ghostty (native KGP) and iTerm2 (sixel fallback).
+  PTY-verified: KGP APC sequence format, zlib round-trip, sixel fallback still
+  compiles and links.
 - **(Mac, tui-design review) Mouse-only dialogs, Edit paint, Jump wheel/pan.**
   Three changes from a `tui-design` skill-guided review that made the secondary
   pages fully mouse-operable.
