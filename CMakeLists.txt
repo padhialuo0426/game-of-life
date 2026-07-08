@@ -71,37 +71,24 @@ include(GNUInstallDirs)
 # The executable goes to <prefix>/bin (i.e. ~/.local/bin by default).
 install(TARGETS game-of-life RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# Install the bundled patterns (saves/*.rle, including the auto-loaded
-# default.rle) into the XDG *data* location's saves directory — where the program
-# looks when run without -f, and where the in-app Save/Load browses. Kept separate
-# from the config directory (settings) on purpose. Evaluated at install time so it
-# respects the invoking user's HOME / XDG_DATA_HOME, and it never clobbers a
-# pattern the user already has (their own edits/saves are safe).
+# Install the bundled patterns (saves/*.rle) via cmake/cmake_install.cmake.in,
+# run at install time so it respects the invoking user's HOME / XDG_DATA_HOME.
+# The shipped pattern names are baked into both the install and uninstall
+# scripts so they act on exactly this set and never the user's own saves. The
+# configured copy is named cmake_install_patterns.cmake because CMake itself
+# generates <build>/cmake_install.cmake (the install manifest) and configuring
+# over it would clobber the whole install step.
 file(GLOB GOL_BUNDLED_PATTERNS
      RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/saves"
      "${CMAKE_CURRENT_SOURCE_DIR}/saves/*.rle")
-install(CODE "
-    set(data_home \"\$ENV{XDG_DATA_HOME}\")
-    if(data_home STREQUAL \"\")
-        set(data_home \"\$ENV{HOME}/.local/share\")
-    endif()
-    set(saves \"\${data_home}/game-of-life/saves\")
-    foreach(pat ${GOL_BUNDLED_PATTERNS})
-        set(dest \"\${saves}/\${pat}\")
-        if(EXISTS \"\${dest}\")
-            message(STATUS \"Keeping existing pattern: \${dest}\")
-        else()
-            file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/saves/\${pat}\"
-                 DESTINATION \"\${saves}\")
-            message(STATUS \"Installed pattern: \${dest}\")
-        endif()
-    endforeach()
-")
+list(JOIN GOL_BUNDLED_PATTERNS " " GOL_BUNDLED_PATTERNS_STR)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_install.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake_install_patterns.cmake"
+    @ONLY)
+install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/cmake_install_patterns.cmake")
 
 # --- Uninstall (removes the executable, bundled patterns, settings) ---------
-# Bake the shipped pattern names in so uninstall removes exactly those and never
-# the user's own saved patterns.
-list(JOIN GOL_BUNDLED_PATTERNS " " GOL_BUNDLED_PATTERNS_STR)
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_uninstall.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake"

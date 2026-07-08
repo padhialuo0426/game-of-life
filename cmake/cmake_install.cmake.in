@@ -1,0 +1,32 @@
+# Bundled-pattern install script for game-of-life.
+# Run at install time via install(SCRIPT ...) — see CMakeLists.txt. The
+# configured copy is written to the build dir as cmake_install_patterns.cmake
+# (NOT cmake_install.cmake: CMake generates a file of that exact name itself,
+# and configuring over it would clobber the real install manifest).
+# @VAR@ tokens are substituted at configure time; ${...} / $ENV{...} are left
+# literal and evaluated when this script runs, so it respects the invoking
+# user's HOME / XDG_DATA_HOME.
+
+# Install the bundled patterns (saves/*.rle, including the auto-loaded
+# default.rle) into the XDG *data* location's saves directory — where the
+# program looks when run without -f, and where the in-app Save/Load browses.
+# Kept separate from the config directory (settings) on purpose, and it never
+# clobbers a pattern the user already has (their own edits/saves are safe).
+set(data_home "$ENV{XDG_DATA_HOME}")
+if(data_home STREQUAL "")
+    set(data_home "$ENV{HOME}/.local/share")
+endif()
+set(saves_dir "${data_home}/game-of-life/saves")
+
+set(bundled "@GOL_BUNDLED_PATTERNS_STR@")
+separate_arguments(bundled)
+foreach(pat ${bundled})
+    set(dest "${saves_dir}/${pat}")
+    if(EXISTS "${dest}")
+        message(STATUS "Keeping existing pattern: ${dest}")
+    else()
+        file(INSTALL "@CMAKE_CURRENT_SOURCE_DIR@/saves/${pat}"
+             DESTINATION "${saves_dir}")
+        message(STATUS "Installed pattern: ${dest}")
+    endif()
+endforeach()

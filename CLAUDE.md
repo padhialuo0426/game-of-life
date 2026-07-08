@@ -100,6 +100,15 @@ with its CMake target; it can be recovered from git history if wanted).
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Extract the pattern-install step into `cmake/cmake_install.cmake.in`.**
+  The inline `install(CODE "...")` block (escaped-string CMake inside CMake) in
+  CMakeLists.txt is now a real script file next to `cmake_uninstall.cmake.in`,
+  configured with the baked-in bundled-pattern list and run via
+  `install(SCRIPT ...)`. NOTE: the configured copy in the build dir is named
+  `cmake_install_patterns.cmake`, NOT `cmake_install.cmake` — CMake generates
+  `<build>/cmake_install.cmake` (the install manifest) itself, and configuring
+  over it would clobber the whole install step. Verified: fresh configure +
+  build; a deleted bundled pattern is re-installed, existing ones are kept.
 - **(Fedora) Reorganise `src/` into `core/ render/ io/ ui/`; drop `tests/`.**
   Sources are now grouped by responsibility (see "Source layout"); all local
   includes are subdir-qualified (`#include "core/engine.h"`), include root stays
