@@ -34,6 +34,15 @@
 #define ANSI_RESET       "\033[0m"
 #define ANSI_CLR_BELOW   "\033[J"  /* erase from cursor to end of screen */
 
+/* Synchronized output (DEC private mode 2026). Everything written between
+   SYNC_BEGIN and SYNC_END is composited by the terminal and presented as one
+   frame, so a clear-then-redraw never shows the intermediate blank screen (a
+   strobing white flash on every zoom notch otherwise — a photosensitivity
+   hazard). Terminals that don't know the mode ignore both sequences, and the
+   spec mandates a timeout so an unmatched BEGIN can't wedge the display. */
+#define SYNC_BEGIN "\033[?2026h"
+#define SYNC_END   "\033[?2026l"
+
 /* Background for text overlays that float on top of the world image (the top
    status HUD and the bottom-right popup toast): opaque black cell with bright
    text so it stays readable over any pixels underneath. This is opacity, not
@@ -779,6 +788,7 @@ static void emit_frame(App *app, char *img, size_t img_len,
     const uint64_t hash = fnv1a(img, img_len);
     const bool image_changed = !app->sx_drawn || hash != app->sx_last_hash ||
                                img_w != app->sx_last_w || img_h != app->sx_last_h;
+    fputs(SYNC_BEGIN, stdout); /* present the whole frame at once (no flash) */
     if (image_changed) {
         /* Clear the screen only when the image size changed (avoids leaving stale
            pixels around a now-smaller image without flickering every frame). */
@@ -854,6 +864,7 @@ static void emit_frame(App *app, char *img, size_t img_len,
     append_controls(app, ctl, sizeof(ctl), &n, img_rows, cols);
     fwrite(ctl, 1, n, stdout);
 
+    fputs(SYNC_END, stdout);
     fflush(stdout);
 }
 
@@ -945,18 +956,21 @@ static void render_dialog(App *app) {
     int chh = h - 2;   /* content rows */
     if (cw < 10) cw = 10;
 
-    /* Clear the screen before the dialog. With KGP the world image lives on a
-       separate graphics layer that text-cell backgrounds do not occlude, so a
-       dialog drawn "over" the world would be see-through on that layer. A full
-       clear removes the KGP image; the next world frame re-emits it. */
-    fputs(ANSI_CLEAR, stdout);
-
     char dir[768];
     if (!settings_saves_dir(dir, sizeof(dir))) snprintf(dir, sizeof(dir), "(unknown)");
 
     size_t bcap = (size_t)(h + 4) * (size_t)(w * 2 + 160) + 4096;
     char *buf = malloc(bcap);
     if (buf == NULL) return;
+
+    /* Clear the screen before the dialog. With KGP the world image lives on a
+       separate graphics layer that text-cell backgrounds do not occlude, so a
+       dialog drawn "over" the world would be see-through on that layer. A full
+       clear removes the KGP image; the next world frame re-emits it. The clear
+       and the dialog go out in one synchronized frame so the blank screen in
+       between is never presented. */
+    fputs(SYNC_BEGIN ANSI_CLEAR, stdout);
+
     size_t n = 0;
     app->bar_row = -1;
     app->dlg_sort_row = app->dlg_typepath_row = app->dlg_list_row0 = -1;
@@ -1129,6 +1143,7 @@ static void render_dialog(App *app) {
     }
 
     fwrite(buf, 1, n, stdout);
+    fputs(SYNC_END, stdout);
     fflush(stdout);
     free(buf);
 
@@ -1149,7 +1164,8 @@ static void render_too_small(App *app, int cols, int rows, int min_cols) {
     int row = rows / 2 + 1;         if (row < 1) row = 1;
     char buf[128];
     size_t n = 0;
-    appendf(buf, sizeof(buf), &n, ANSI_CLEAR "\033[%d;%dH%.*s", row, col, cols, msg);
+    appendf(buf, sizeof(buf), &n, SYNC_BEGIN ANSI_CLEAR "\033[%d;%dH%.*s" SYNC_END,
+            row, col, cols, msg);
     fwrite(buf, 1, n, stdout);
     fflush(stdout);
     app->sx_drawn = false;

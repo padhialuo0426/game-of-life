@@ -84,6 +84,21 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Kill the white flash on forced repaints (synchronized output).**
+  Every "clear the screen, then redraw" path used to hand the terminal the clear
+  and the new frame as separate writes, so the blank background was *presented*
+  between them — on wheel zoom (image size changes every notch ⇒ full `\033[2J`
+  per notch) this strobed white, a photosensitivity hazard. All three such paths
+  (`emit_frame`, `render_dialog`, `render_too_small`) are now bracketed in
+  **DEC private mode 2026 synchronized output** (`SYNC_BEGIN`/`SYNC_END` =
+  `\033[?2026h/l`): the terminal composites everything in the bracket and
+  presents it as one frame, so the intermediate blank screen never reaches the
+  display. Supported by Ghostty/Kitty/WezTerm/foot/Konsole/iTerm2; unknown-mode
+  sequences are ignored elsewhere, and the spec's mandatory timeout means an
+  unmatched BEGIN can't wedge a terminal. `render_dialog`'s clear moved after
+  its malloc so the early-return path never leaves a frame open. PTY-verified:
+  every `2J` sits inside a BSU..ESU bracket (zoom, dialog open, dialog close);
+  steady running frames are bracketed with no clear.
 - **(Fedora) Linear wheel-zoom + fixed 10 ms speed steps.** Two step-size tweaks:
   `ZOOM_STEP` 2→1 so each wheel notch moves the chunky zoom exactly 1 px/cell
   (20..1; the sub-pixel ladder still doubles per notch), and `adjust_speed` is now
