@@ -35,8 +35,33 @@
 
 /* Background for text overlays that float on top of the world image (the top
    status HUD and the bottom-right popup toast): opaque black cell with bright
-   text so it stays readable over any pixels underneath. */
+   text so it stays readable over any pixels underneath. This is opacity, not
+   decoration, so it stays even under NO_COLOR (dropping it would leave overlay
+   text unreadable over the sixel pixels beneath). */
 #define HUD_BG           "\033[40;37m"
+
+/* Rounded single-line box-drawing glyphs (UTF-8 bytes), used for every floating
+   overlay's border. Safe on the modern sixel terminals this program requires
+   (iTerm2/Konsole/WezTerm/foot). Explicit byte escapes so they don't depend on
+   the compiler's execution charset. */
+#define BX_H  "\xe2\x94\x80" /* ─ */
+#define BX_V  "\xe2\x94\x82" /* │ */
+#define BX_TL "\xe2\x95\xad" /* ╭ */
+#define BX_TR "\xe2\x95\xae" /* ╮ */
+#define BX_BR "\xe2\x95\xaf" /* ╯ */
+#define BX_BL "\xe2\x95\xb0" /* ╰ */
+
+/* Return to HUD_BG's white foreground / turn attributes off, without disturbing
+   the opaque background — used to close a coloured or dimmed span mid-overlay. */
+#define SGR_FG_RESET "\033[22;37m" /* bold+dim off, fg back to white */
+
+/* Semantic emphasis for overlay text. Colour is suppressed under NO_COLOR (set in
+   main); bold/dim are attributes (monochrome-safe) and always kept. */
+static const char *SGR_TITLE = "\033[1;36m";  /* bold cyan — dialog titles */
+static const char *SGR_ACCENT = "\033[36m";   /* cyan — active/"on" values */
+static const char *SGR_OK = "\033[32m";       /* green — running */
+static const char *SGR_WARN = "\033[33m";     /* yellow — paused */
+#define SGR_DIM "\033[2m"                      /* dim — secondary metadata */
 
 /* End-of-line: erase to the end of the line, then break. Ensures a shorter new
    line fully overwrites a longer previous one (no leftover characters). */
@@ -457,12 +482,14 @@ static void plot_cell_cb(int x, int y, void *ud) {
                            (y - p->cam_y) / p->cpp);
 }
 
-/* Append the controls block below the sixel image: status line, a blank line,
-   the button bar, a blank line, and the hint line. */
-/* Build the mode-appropriate status line (plain text, no embedded SGR so its
-   printed width equals strlen — the top HUD pads by that). This is the bar that
-   now floats over the top of the world instead of sitting below it. */
-static void build_status(const App *app, char *buf, size_t cap) {
+/* Build the mode-appropriate status line for the top HUD. With styled=false the
+   text is plain (no SGR), so strlen equals its printed width — the caller uses
+   that for centring/padding. With styled=true the SAME visible characters are
+   emitted with semantic colour/dim inserted (State value coloured by run-state,
+   secondary fields dimmed, Follow accented when on); the visible width is
+   unchanged, so both calls agree. The styled form is used only when the line fits
+   without truncation (truncating across SGR is avoided). */
+static void build_status(const App *app, char *buf, size_t cap, bool styled) {
     if (app->jumping) {
         snprintf(buf, cap, "JUMPING   Gen: %ld / %ld   Live: %zu   (Esc to stop)",
                  app->gen, app->jump_target, engine_population(app->engine));
@@ -472,7 +499,7 @@ static void build_status(const App *app, char *buf, size_t cap) {
     } else if (app->mode == UI_EDIT) {
         snprintf(buf, cap, "EDIT   Cursor: (%d,%d)   Live: %zu",
                  app->cursor_x, app->cursor_y, engine_population(app->engine));
-    } else {
+    } else if (!styled) {
         char zbuf[16];
         zoom_label(app, zbuf, sizeof(zbuf));
         snprintf(buf, cap,
@@ -481,6 +508,25 @@ static void build_status(const App *app, char *buf, size_t cap) {
                  sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
                  engine_population(app->engine), zbuf,
                  app->delay_ms, app->follow ? "on" : "off");
+    } else {
+        char zbuf[16];
+        zoom_label(app, zbuf, sizeof(zbuf));
+        const char *scol = app->sim == SIM_RUNNING ? SGR_OK
+                         : app->sim == SIM_PAUSED  ? SGR_WARN : SGR_DIM;
+        const char *fcol = app->follow ? SGR_ACCENT : SGR_DIM;
+        /* Same field order and visible text as the plain form (State, Gen, Cam,
+           Live, Zoom, Delay, Follow) so the widths agree. State is coloured by
+           run-state; Cam and Zoom/Delay are dimmed as secondary (Live stays bright
+           between them); Follow's value is accented when on. Each span closes with
+           SGR_FG_RESET, which keeps the opaque HUD background intact. */
+        snprintf(buf, cap,
+                 "State: %s%s" SGR_FG_RESET "   Gen: %ld   "
+                 SGR_DIM "Cam: (%d,%d)" SGR_FG_RESET "   Live: %zu   "
+                 SGR_DIM "Zoom: %s   Delay: %ldms" SGR_FG_RESET
+                 "   Follow: %s%s" SGR_FG_RESET,
+                 scol, sim_label(app->sim), app->gen, app->cam_x, app->cam_y,
+                 engine_population(app->engine), zbuf, app->delay_ms,
+                 fcol, app->follow ? "on" : "off");
     }
 }
 
@@ -611,29 +657,31 @@ static void flash_selected_button(const App *app) {
     fflush(stdout);
 }
 
-/* Shared primitive behind every "popup" overlay (see popup.h for the STICKY /
-   TIMED / MODAL taxonomy): draw an opaque, bg-filled box at 1-based (x0,y0) of
-   size w x h floating over the world, bordered with the `corner`/`horiz`/`vert`
-   characters. If `corner` is 0 the box has no border (a plain fill). The caller
-   writes the box's content on top afterwards. */
+/* Shared primitive behind every floating overlay (the modal dialogs and the popup
+   toast): draw an opaque, bg-filled box at 1-based (x0,y0) of size w x h over the
+   world, with a rounded single-line border. The border glyphs are multibyte
+   UTF-8, so the interior run is built once and reused per row (rather than a
+   single memset). The caller writes the box's content on top afterwards. */
 static void overlay_box(char *buf, size_t cap, size_t *n,
-                        int x0, int y0, int w, int h,
-                        char corner, char horiz, char vert) {
+                        int x0, int y0, int w, int h) {
     if (w < 1 || h < 1) return;
-    char border[520], fill[520];
-    int iw = w - 2; if (iw < 0) iw = 0; if (iw > 517) iw = 517;
-    if (corner) {
-        border[0] = corner; memset(border + 1, horiz, (size_t)iw);
-        border[1 + iw] = corner; border[2 + iw] = '\0';
-        fill[0] = vert; memset(fill + 1, ' ', (size_t)iw);
-        fill[1 + iw] = vert; fill[2 + iw] = '\0';
-    } else {
-        int fw = w; if (fw > 518) fw = 518;
-        memset(fill, ' ', (size_t)fw); fill[fw] = '\0';
-    }
+    int iw = w - 2; if (iw < 0) iw = 0; if (iw > 512) iw = 512;
+    char hrun[512 * 3 + 1]; /* iw horizontal glyphs (3 bytes each) */
+    size_t hl = 0;
+    for (int i = 0; i < iw; i++) { memcpy(hrun + hl, BX_H, 3); hl += 3; }
+    hrun[hl] = '\0';
+    char blank[512 + 1];
+    memset(blank, ' ', (size_t)iw); blank[iw] = '\0';
     for (int r = 0; r < h; r++) {
-        const char *ln = (corner && (r == 0 || r == h - 1)) ? border : fill;
-        appendf(buf, cap, n, "\033[%d;%dH" HUD_BG "%s" ANSI_RESET, y0 + r, x0, ln);
+        appendf(buf, cap, n, "\033[%d;%dH" HUD_BG, y0 + r, x0);
+        if (r == 0) {
+            appendf(buf, cap, n, BX_TL "%s" BX_TR, hrun);
+        } else if (r == h - 1) {
+            appendf(buf, cap, n, BX_BL "%s" BX_BR, hrun);
+        } else {
+            appendf(buf, cap, n, BX_V "%s" BX_V, blank);
+        }
+        appendf(buf, cap, n, ANSI_RESET);
     }
 }
 
@@ -676,33 +724,42 @@ static void emit_frame(App *app, char *img, size_t img_len,
 
     int maxw = cols - 2; if (maxw < 1) maxw = 1; /* room for the two pad spaces */
     char status[256];
-    build_status(app, status, sizeof(status));
-    int svis = (int)strlen(status);
-    if (svis > maxw) svis = maxw;
+    build_status(app, status, sizeof(status), false); /* plain: for the width */
+    int full = (int)strlen(status);
+    int svis = full; if (svis > maxw) svis = maxw;
     if (svis > app->hud_w) app->hud_w = svis; /* grow-only, no shrink artifacts */
     if (app->hud_w > maxw) app->hud_w = maxw;
     /* Centre the bar on the top row: 1 lead + hud_w content + 1 trail space. */
     int barw = app->hud_w + 2;
     int hstart = (cols - barw) / 2 + 1; if (hstart < 1) hstart = 1; /* 1-based */
-    appendf(ov, sizeof(ov), &on, "\033[1;%dH" HUD_BG " %.*s", hstart, svis, status);
+    appendf(ov, sizeof(ov), &on, "\033[1;%dH" HUD_BG " ", hstart);
+    if (full <= maxw) {
+        /* Fits without truncation: draw the semantically-coloured version (same
+           visible width as the plain text measured above). */
+        char styled[512];
+        build_status(app, styled, sizeof(styled), true);
+        appendf(ov, sizeof(ov), &on, "%s" SGR_FG_RESET, styled);
+    } else {
+        appendf(ov, sizeof(ov), &on, "%.*s", svis, status);
+    }
     for (int i = svis; i < app->hud_w; i++) appendf(ov, sizeof(ov), &on, " ");
     appendf(ov, sizeof(ov), &on, " " ANSI_RESET);
 
-    /* Toast: an asterisk-bordered box floating near the world's bottom-right, for
-       a "notification" highlight. Three rows (top border, text, bottom border),
+    /* Toast: a rounded box floating near the world's bottom-right, for a
+       "notification" highlight. Three rows (top border, text, bottom border),
        inset up-and-left from the very corner by a small margin so it reads as a
        floating card rather than being jammed into the edge. */
     if (popup_visible(&app->popup)) {
         const int MX = 4, MY = 2;            /* right / bottom margins (cells) */
         int plen = (int)strlen(app->popup.text);
-        int boxw = plen + 4;                 /* '*' ' ' text ' ' '*' */
+        int boxw = plen + 4;                 /* border ' ' text ' ' border */
         if (boxw > cols) boxw = cols;
         int x0 = cols - boxw + 1 - MX;        /* 1-based left column */
         if (x0 < 1) x0 = 1;
         int ytop = img_rows - 2 - MY;         /* top row; bottom == img_rows - MY */
         if (ytop < 1) ytop = 1;
         int inner = boxw - 4; if (inner < 0) inner = 0; /* text width inside the box */
-        overlay_box(ov, sizeof(ov), &on, x0, ytop, boxw, 3, '*', '*', '*');
+        overlay_box(ov, sizeof(ov), &on, x0, ytop, boxw, 3);
         appendf(ov, sizeof(ov), &on, "\033[%d;%dH" HUD_BG "%-*.*s" ANSI_RESET,
                 ytop + 1, x0 + 2, inner, inner, app->popup.text);
     }
@@ -748,6 +805,22 @@ static void dlg_row(char *buf, size_t cap, size_t *n, int cy, int cx, int line,
             cy + line + 1, cx + 1, text);
 }
 
+/* A dialog title: bold + accent colour (dlg_row's trailing reset closes it). */
+static void dlg_title(char *buf, size_t cap, size_t *n, int cy, int cx, int line,
+                      const char *text) {
+    char t[160];
+    snprintf(t, sizeof(t), "%s%s", SGR_TITLE, text);
+    dlg_row(buf, cap, n, cy, cx, line, t);
+}
+
+/* A dimmed content line (secondary metadata / footer hints). */
+static void dlg_dim(char *buf, size_t cap, size_t *n, int cy, int cx, int line,
+                    const char *text) {
+    char t[1024];
+    snprintf(t, sizeof(t), SGR_DIM "%s", text);
+    dlg_row(buf, cap, n, cy, cx, line, t);
+}
+
 /* Draw a centred modal window (save / load / confirm) as a black bordered box
    floating over the world image, and record the mouse hit boxes in screen
    coordinates. The world around the box is left untouched; the image the box
@@ -782,30 +855,34 @@ static void render_dialog(App *app) {
     app->dlg_sort_row = app->dlg_typepath_row = app->dlg_list_row0 = -1;
     app->dlg_confirm_row = -1;
 
-    /* 1) Frame: black fill + ASCII border, overlaid on the world (shared with the
-       toast via overlay_box; 1-based coords, so the 0-based x0/y0 get +1). */
-    overlay_box(buf, bcap, &n, x0 + 1, y0 + 1, w, h, '+', '-', '|');
+    /* 1) Frame: black fill + rounded border, overlaid on the world (shared with
+       the toast via overlay_box; 1-based coords, so the 0-based x0/y0 get +1). */
+    overlay_box(buf, bcap, &n, x0 + 1, y0 + 1, w, h);
 
     /* 2) Content, written over the black box. */
     char line[1024];
     if (app->mode == UI_SAVE_NAME) {
-        dlg_row(buf, bcap, &n, cy, cx, 0, "Save pattern");
+        dlg_title(buf, bcap, &n, cy, cx, 0, "Save pattern");
         snprintf(line, sizeof(line), "Folder: %.*s", cw - 8, dir);
-        dlg_row(buf, bcap, &n, cy, cx, 1, line);
-        snprintf(line, sizeof(line), "Save as: \033[7m%s \033[0m" DLG_BG ".rle",
-                 app->file_buf);
+        dlg_dim(buf, bcap, &n, cy, cx, 1, line);
+        snprintf(line, sizeof(line), "Save as: \033[7m%s \033[0m" DLG_BG
+                 SGR_DIM ".rle", app->file_buf);
         dlg_row(buf, bcap, &n, cy, cx, 3, line);
-        dlg_row(buf, bcap, &n, cy, cx, 5,
+        /* Footer hint anchored to the box bottom; any result message just above. */
+        dlg_dim(buf, bcap, &n, cy, cx, chh - 1,
                 "Enter save    Esc cancel    (.rle added automatically)");
         if (app->msg[0]) {
             snprintf(line, sizeof(line), "%.*s", cw, app->msg);
-            dlg_row(buf, bcap, &n, cy, cx, 7, line);
+            dlg_row(buf, bcap, &n, cy, cx, chh - 3, line);
         }
     } else if (app->mode == UI_HELP) {
         /* A compact controls reference. Kept short so it fits the box on small
-           terminals (content rows = chh). Closes on any key/click (handle_help). */
+           terminals (content rows = chh). Closes on any key/click (handle_help).
+           Flush-left lines are section headers (accented); "  "-indented lines are
+           entries. The title and the closing hint are drawn separately. */
+        dlg_title(buf, bcap, &n, cy, cx, 0,
+                  "Conway's Game of Life \342\200\224 Controls");
         static const char *const help[] = {
-            "Conway's Game of Life \342\200\224 Controls",
             "",
             "Menu (click, or Tab/arrows then Space):",
             "  Play/Pause (P)   run or pause",
@@ -820,14 +897,19 @@ static void render_dialog(App *app) {
             "  Drag = pan     Wheel = zoom",
             "  + / - = speed  c = center  f = follow",
             "  x = clear the world",
-            "",
-            "Press any key or click to close.",
         };
         int nlines = (int)(sizeof(help) / sizeof(help[0]));
-        for (int i = 0; i < nlines && i < chh; i++) {
-            snprintf(line, sizeof(line), "%.*s", cw, help[i]);
-            dlg_row(buf, bcap, &n, cy, cx, i, line);
+        for (int i = 0; i < nlines && i + 1 < chh - 1; i++) {
+            if (help[i][0] != '\0' && help[i][0] != ' ') {
+                /* Section header: accent (colour, not bold — avoid over-bolding). */
+                snprintf(line, sizeof(line), "%s%.*s" SGR_FG_RESET,
+                         SGR_ACCENT, cw, help[i]);
+            } else {
+                snprintf(line, sizeof(line), "%.*s", cw, help[i]);
+            }
+            dlg_row(buf, bcap, &n, cy, cx, i + 1, line);
         }
+        dlg_dim(buf, bcap, &n, cy, cx, chh - 1, "Press any key or click to close.");
     } else if (app->mode == UI_CONFIRM) {
         int midr = chh / 2 - 1; if (midr < 1) midr = 1;
         snprintf(line, sizeof(line), "%.*s", cw, app->confirm_msg);
@@ -846,51 +928,56 @@ static void render_dialog(App *app) {
                  app->confirm_sel == 0 ? ANSI_REVERSE : "", yes,
                  app->confirm_sel == 1 ? ANSI_REVERSE : "", no);
         dlg_row(buf, bcap, &n, cy, cx, midr + 2, line);
-        dlg_row(buf, bcap, &n, cy, cx, midr + 4,
+        dlg_dim(buf, bcap, &n, cy, cx, midr + 4,
                 "Tab/Arrows move   Enter select   y/n shortcut   Esc = no");
     } else { /* UI_LOAD_LIST */
-        dlg_row(buf, bcap, &n, cy, cx, 0, "Load pattern");
+        snprintf(line, sizeof(line), "Load pattern  (%d)", app->save_count);
+        dlg_title(buf, bcap, &n, cy, cx, 0, line);
         snprintf(line, sizeof(line), "Folder: %.*s", cw - 8, dir);
-        dlg_row(buf, bcap, &n, cy, cx, 1, line);
+        dlg_dim(buf, bcap, &n, cy, cx, 1, line);
 
-        /* Sort row (content line 3). */
+        /* Sort row (content line 3): the active key is reverse-highlighted and
+           carries a ▲/▼ direction arrow. The arrow is one display cell but 3
+           UTF-8 bytes, so the hit box for the active label is widened by 2 cells
+           (" ▼") and visc is advanced by that display width, keeping the mouse
+           hit-test aligned with what is drawn. */
         app->dlg_sort_row = cy + 3;
+        const char *ar = app->sort_desc ? "\xe2\x96\xbc" : "\xe2\x96\xb2"; /* ▼ ▲ */
         int p = 0, visc = cx; /* visc: 0-based screen col of next visible char */
         p += snprintf(line + p, sizeof(line) - (size_t)p, "Sort: ");
         visc += 6;
         const char *sn[3] = {"Name", "Size", "Modified"};
         for (int k = 0; k < 3; k++) {
-            int wl = (int)strlen(sn[k]) + 2;
+            bool active = (int)app->sort_key == k;
+            int wl = (int)strlen(sn[k]) + 2 + (active ? 2 : 0); /* +" ▼" cells */
             app->dlg_sort_c0[k] = visc;
             app->dlg_sort_c1[k] = visc + wl;
-            if ((int)app->sort_key == k) {
+            if (active) {
                 p += snprintf(line + p, sizeof(line) - (size_t)p,
-                              "\033[7m[%s]\033[0m" DLG_BG " ", sn[k]);
+                              "\033[7m[%s %s]\033[0m" DLG_BG " ", sn[k], ar);
             } else {
                 p += snprintf(line + p, sizeof(line) - (size_t)p, "[%s] ", sn[k]);
             }
             visc += wl + 1;
         }
-        snprintf(line + p, sizeof(line) - (size_t)p, "(%s)",
-                 app->sort_desc ? "desc" : "asc");
         dlg_row(buf, bcap, &n, cy, cx, 3, line);
 
         /* Type-a-path row (content line 4). */
         app->dlg_typepath_row = cy + 4;
         if (app->load_typing) {
             snprintf(line, sizeof(line),
-                     "Path: \033[7m%s \033[0m" DLG_BG "  Enter load  Esc back",
+                     "Path: \033[7m%s \033[0m" DLG_BG SGR_DIM "  Enter load  Esc back",
                      app->file_buf);
+            dlg_row(buf, bcap, &n, cy, cx, 4, line);
         } else {
-            snprintf(line, sizeof(line), "[Type a path...]  (press /)");
+            dlg_dim(buf, bcap, &n, cy, cx, 4, "[Type a path...]  (press /)");
         }
-        dlg_row(buf, bcap, &n, cy, cx, 4, line);
 
-        /* Header (content line 5) + list (from content line 6). */
+        /* Header (content line 5, dimmed) + list (from content line 6). */
         int namew = cw - 30; if (namew < 8) namew = 8;
         snprintf(line, sizeof(line), "%-*.*s %8s  %s", namew, namew,
                  "NAME", "SIZE", "MODIFIED");
-        dlg_row(buf, bcap, &n, cy, cx, 5, line);
+        dlg_dim(buf, bcap, &n, cy, cx, 5, line);
 
         app->dlg_list_row0 = cy + 6;
         int listvis = chh - 6 - 1; /* leave the footer row */
@@ -902,7 +989,7 @@ static void render_dialog(App *app) {
         if (app->save_top < 0) app->save_top = 0;
 
         if (app->save_count == 0) {
-            dlg_row(buf, bcap, &n, cy, cx, 6,
+            dlg_dim(buf, bcap, &n, cy, cx, 6,
                     "(no saved patterns — press / to type a path)");
         } else {
             for (int i = 0; i < listvis; i++) {
@@ -922,7 +1009,7 @@ static void render_dialog(App *app) {
                 dlg_row(buf, bcap, &n, cy, cx, 6 + i, line);
             }
         }
-        dlg_row(buf, bcap, &n, cy, cx, chh - 1,
+        dlg_dim(buf, bcap, &n, cy, cx, chh - 1,
                 "Up/Dn move  Enter/click load  d delete  / path  Esc cancel");
     }
 
@@ -2103,6 +2190,14 @@ static bool build_initial(Board *initial, const Options *opt) {
 }
 
 int main(int argc, char **argv) {
+    /* Honour NO_COLOR (no-color.org): drop the semantic colours, keeping only
+       bold/dim attributes (monochrome-safe) and the structural overlay
+       background. */
+    if (getenv("NO_COLOR") != NULL) {
+        SGR_TITLE = "\033[1m"; /* bold, no colour */
+        SGR_ACCENT = SGR_OK = SGR_WARN = "";
+    }
+
     /* Start from persisted settings (or built-in defaults on first run), then
        let command-line options override for this run. */
     Settings settings;
