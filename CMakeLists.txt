@@ -27,6 +27,7 @@ add_executable(game-of-life
     src/config.c
     src/engine.c
     src/history.c
+    src/kitty.c
     src/popup.c
     src/rle.c
     src/settings.c
@@ -46,6 +47,26 @@ if(OpenMP_C_FOUND)
 else()
     message(STATUS "OpenMP not found: stepping stays single-threaded")
 endif()
+
+# Kitty Graphics Protocol encoder uses zlib. Both macOS and Linux ship it.
+find_package(ZLIB REQUIRED)
+target_link_libraries(game-of-life PRIVATE ZLIB::ZLIB)
+message(STATUS "ZLIB found: KGP canvas enabled")
+
+# ---- Test: KGP canvas + sixel fallback -------------------------------------
+enable_testing()
+add_executable(test-kitty
+    tests/test_kitty.c
+    src/kitty.c
+    src/sixel.c
+    src/board.c)
+target_include_directories(test-kitty PRIVATE src)
+target_link_libraries(test-kitty PRIVATE ZLIB::ZLIB)
+target_compile_options(test-kitty PRIVATE
+    -Wall -Wextra -Wpedantic
+    $<$<CONFIG:Debug>:-g -O0>
+    $<$<CONFIG:Release>:-O2 -DNDEBUG>)
+add_test(NAME kitty-canvas COMMAND test-kitty)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(game-of-life PRIVATE

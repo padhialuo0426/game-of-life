@@ -68,4 +68,12 @@ bool terminal_pixel_size(int *xpx, int *ypx);
    detection: "0" forces off, "1" forces on (no query is sent). */
 bool terminal_query_sixel(void);
 
+/* Detect whether the terminal supports the Kitty Graphics Protocol. Sends a
+   KGP query and waits for an "OK" acknowledgment (ESC G … OK … ESC \). Must be
+   called while in raw mode (after terminal_init). Prefer KGP over sixel when
+   both are available (KGP's zlib compression and native caching produce smaller
+   frames). The environment variable GOL_KITTY overrides detection: "0" forces
+   off, "1" forces on (no query is sent). */
+bool terminal_query_kitty(void);
+
 #endif /* GAME_OF_LIFE_TERMINAL_H */

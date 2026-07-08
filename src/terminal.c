@@ -247,3 +247,35 @@ bool terminal_query_sixel(void) {
     buf[n] = '\0';
     return da_has_sixel(buf);
 }
+
+bool terminal_query_kitty(void) {
+    const char *env = getenv("GOL_KITTY");
+    if (env != NULL) {
+        if (strcmp(env, "0") == 0) return false;
+        if (strcmp(env, "1") == 0) return true;
+        /* Any other value falls through to live detection. */
+    }
+
+    /* Send a KGP query: ESC _ G i=1,a=q; ESC \ (APC … ST, exactly 13 bytes).
+       A KGP-capable terminal responds with OK, e.g.
+       ESC _ G i=1;OK; ESC \. */
+    const char q[] = "\033_Gi=1,a=q;\033\\";
+    if (write(STDOUT_FILENO, q, sizeof(q) - 1) != (ssize_t)(sizeof(q) - 1))
+        return false;
+
+    char buf[64];
+    size_t n = 0;
+    while (n < sizeof(buf) - 1) {
+        struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
+        if (poll(&pfd, 1, 200) <= 0) break;
+        char c;
+        if (read(STDIN_FILENO, &c, 1) != 1) break;
+        buf[n++] = c;
+        /* KGP ST (string terminator) is ESC \ (0x1b 0x5c), but some terminals
+           use 8-bit ST (0x9c). Accept either. */
+        if (n >= 2 && buf[n-2] == '\033' && buf[n-1] == '\\') break;
+        if (n >= 1 && (unsigned char)buf[n-1] == 0x9c) break;
+    }
+    buf[n] = '\0';
+    return strstr(buf, "OK") != NULL;
+}

@@ -4,6 +4,7 @@
 #include "config.h"
 #include "engine.h"
 #include "history.h"
+#include "kitty.h"
 #include "popup.h"
 #include "rle.h"
 #include "settings.h"
@@ -37,8 +38,13 @@
    status HUD and the bottom-right popup toast): opaque black cell with bright
    text so it stays readable over any pixels underneath. This is opacity, not
    decoration, so it stays even under NO_COLOR (dropping it would leave overlay
-   text unreadable over the sixel pixels beneath). */
-#define HUD_BG           "\033[40;37m"
+   text unreadable over the pixels beneath).
+
+   Uses truecolor black (R=0,G=0,B=0) rather than the ANSI palette black
+   (\033[40m) because KGP terminals (Ghostty et al.) may treat the ANSI
+   "default" background as partially transparent over KGP images, while an
+   explicit RGB colour is always opaque. */
+#define HUD_BG           "\033[48;2;0;0;0;37m"
 
 /* Rounded single-line box-drawing glyphs (UTF-8 bytes), used for every floating
    overlay's border. Safe on the modern sixel terminals this program requires
@@ -179,9 +185,13 @@ typedef struct {
     int cursor_x, cursor_y;     /* world cursor (UI_EDIT) */
     bool blink_on;              /* cursor blink phase (UI_EDIT) */
 
-    int sx_last_w, sx_last_h;   /* last sixel image pixel size (clear on change) */
+    int sx_last_w, sx_last_h;   /* last image pixel size (clear on change) */
     uint64_t sx_last_hash;      /* hash of the last emitted image bytes */
     bool sx_drawn;              /* an image has been emitted at least once */
+
+    /* Graphics protocol: prefer KGP when the terminal supports it, otherwise
+       fall back to sixel. Set once at startup via terminal_query_kitty(). */
+    bool use_kitty;
 
     /* Button-bar hit boxes, recomputed each frame so the bar is mouse-clickable.
        Coordinates are 0-based to match the decoded SGR mouse position. bar_row is
@@ -480,11 +490,15 @@ static void infinite_viewport(const App *app, int *vw, int *vh) {
     *vh = 20;
 }
 
-/* Plot each live cell onto the sixel canvas, translating world coordinates to
+/* A cell-plot target, dispatched-to at call sites. */
+typedef void (*canvas_set_fn)(void *canvas, int col, int row);
+
+/* Plot each live cell onto the canvas, translating world coordinates to
    viewport-local cells. Passed to sparse_query so only the live population is
    touched, never every cell of the (possibly huge) viewport. */
 typedef struct {
-    SixelCanvas *canvas;
+    void *canvas;
+    canvas_set_fn set_alive;
     int cam_x, cam_y;
     int cpp;                /* cells_per_px: world cells mapped to one canvas cell */
 } PlotCtx;
@@ -495,8 +509,8 @@ static void plot_cell_cb(int x, int y, void *ud) {
        one canvas cell; set_alive is idempotent, so the pixel lights if any cell
        in the block is alive (OR-downsampling). x,y are inside [cam, cam+vw), so
        the subtraction is non-negative and the division needs no flooring fix. */
-    sixel_canvas_set_alive(p->canvas, (x - p->cam_x) / p->cpp,
-                           (y - p->cam_y) / p->cpp);
+    p->set_alive(p->canvas, (x - p->cam_x) / p->cpp,
+                 (y - p->cam_y) / p->cpp);
 }
 
 /* Build the mode-appropriate status line for the top HUD. With styled=false the
@@ -835,8 +849,9 @@ static void fmt_mtime(long t, char *buf, size_t cap) {
     strftime(buf, cap, "%Y-%m-%d %H:%M", &tm);
 }
 
-/* Window colours: black background, bright text. */
-#define DLG_BG "\033[40;37m"
+/* Window colours: opaque black background (truecolor, see HUD_BG note), bright
+   text. */
+#define DLG_BG "\033[48;2;0;0;0;37m"
 
 /* Print one content line inside the modal at content-line `line` (0-based within
    the window's content area whose top-left is 0-based (cy, cx)). `text` may embed
@@ -908,6 +923,12 @@ static void render_dialog(App *app) {
     int cy = y0 + 1;   /* content top row, 0-based */
     int chh = h - 2;   /* content rows */
     if (cw < 10) cw = 10;
+
+    /* Clear the screen before the dialog. With KGP the world image lives on a
+       separate graphics layer that text-cell backgrounds do not occlude, so a
+       dialog drawn "over" the world would be see-through on that layer. A full
+       clear removes the KGP image; the next world frame re-emits it. */
+    fputs(ANSI_CLEAR, stdout);
 
     char dir[768];
     if (!settings_saves_dir(dir, sizeof(dir))) snprintf(dir, sizeof(dir), "(unknown)");
@@ -1151,24 +1172,46 @@ static bool render(App *app) {
     const int cpp = app->cells_per_px < 1 ? 1 : app->cells_per_px;
 
     /* The canvas is measured in screen pixels: vw world cells collapse to
-       vw/cpp canvas cells (each `cell` px). One of cell/cpp is always 1. */
+       vw/cpp canvas cells (each `cell` px). One of cell/cpp is always 1.
+       Create the canvas with the preferred graphics protocol. */
     const int ccols = (vw + cpp - 1) / cpp;
     const int crows = (vh + cpp - 1) / cpp;
-    SixelCanvas *canvas = sixel_canvas_new(ccols, crows, cell);
-    if (canvas == NULL) return false;
+    void *canvas = NULL;
+    canvas_set_fn canvas_set;
+    if (app->use_kitty) {
+        KittyCanvas *kc = kitty_canvas_new(ccols, crows, cell);
+        if (kc == NULL) return false;
+        canvas = kc;
+        canvas_set = (canvas_set_fn)kitty_canvas_set_alive;
+    } else {
+        SixelCanvas *sc = sixel_canvas_new(ccols, crows, cell);
+        if (sc == NULL) return false;
+        canvas = sc;
+        canvas_set = (canvas_set_fn)sixel_canvas_set_alive;
+    }
 
-    PlotCtx ctx = {canvas, app->cam_x, app->cam_y, cpp};
+    PlotCtx ctx = {canvas, canvas_set, app->cam_x, app->cam_y, cpp};
     engine_query(app->engine, app->cam_x, app->cam_y,
                  app->cam_x + vw, app->cam_y + vh, plot_cell_cb, &ctx);
 
     if (app->mode == UI_EDIT && app->blink_on) {
-        sixel_canvas_set_cursor(canvas, (app->cursor_x - app->cam_x) / cpp,
-                                (app->cursor_y - app->cam_y) / cpp);
+        int cc = (app->cursor_x - app->cam_x) / cpp;
+        int cr = (app->cursor_y - app->cam_y) / cpp;
+        if (app->use_kitty)
+            kitty_canvas_set_cursor((KittyCanvas *)canvas, cc, cr);
+        else
+            sixel_canvas_set_cursor((SixelCanvas *)canvas, cc, cr);
     }
 
     size_t img_len = 0;
-    char *img = sixel_canvas_encode(canvas, &img_len);
-    sixel_canvas_free(canvas);
+    char *img = NULL;
+    if (app->use_kitty) {
+        img = kitty_canvas_encode((KittyCanvas *)canvas, &img_len);
+        kitty_canvas_free((KittyCanvas *)canvas);
+    } else {
+        img = sixel_canvas_encode((SixelCanvas *)canvas, &img_len);
+        sixel_canvas_free((SixelCanvas *)canvas);
+    }
     if (img == NULL) return false;
 
     emit_frame(app, img, img_len, ccols * cell, crows * cell, cch);
@@ -2472,14 +2515,19 @@ int main(int argc, char **argv) {
     }
     atexit(terminal_restore);
 
-    /* Sixel is the only renderer, so it is a hard requirement. */
-    if (!terminal_query_sixel()) {
+    /* Pick the graphics protocol: prefer KGP (zlib-compressed, lower bandwidth)
+       and fall back to sixel when the terminal does not support it. At least one
+       of them is required — the program exits if neither is available. */
+    bool has_kitty = terminal_query_kitty();
+    bool has_sixel = has_kitty || terminal_query_sixel();
+    if (!has_sixel) {
         terminal_restore();
         fprintf(stderr,
-                "This program requires a sixel-capable terminal "
-                "(e.g. iTerm2, Konsole, WezTerm, foot, xterm -ti vt340).\n"
-                "If your terminal supports sixel but is not detected, force it "
-                "with GOL_SIXEL=1.\n");
+                "This program requires a graphics-capable terminal.\n"
+                "Sixel: iTerm2, Konsole, WezTerm, foot, xterm -ti vt340\n"
+                "  (force with GOL_SIXEL=1)\n"
+                "Kitty Graphics Protocol: Kitty, WezTerm, Konsole >= 24.08\n"
+                "  (force with GOL_KITTY=1)\n");
         return 1;
     }
 
@@ -2513,6 +2561,7 @@ int main(int argc, char **argv) {
     app.cells_per_px = 1;
     app.sort_key = SORT_MTIME; /* load list defaults to newest-first */
     app.sort_desc = true;
+    app.use_kitty = has_kitty;
 
     app.engine = engine_new();
     app.history = history_new(HISTORY_CAP);
