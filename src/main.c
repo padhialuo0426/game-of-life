@@ -157,8 +157,11 @@ typedef enum { SIM_STOPPED, SIM_RUNNING, SIM_PAUSED } SimState;
 
 /* Bottom button bar. Order matters: it is the left-to-right layout. Each label
    carries its keyboard shortcut in parentheses; the same key triggers the button
-   from UI_NORMAL (see handle_normal). Start/Pause are a single Play/Pause toggle.
-   Quit is a button too (mouse-only users need not know 'q'). */
+   from UI_NORMAL (see handle_normal). BTN_PLAY is a toggle: it reads "Pause" while
+   the sim runs and "Start" otherwise (see play_label). "Start" and "Pause" are
+   both five letters, so the label below is a fixed-width stand-in that gives the
+   bar its width — the live text is substituted at render time and never changes
+   width. Quit is a button too (mouse-only users need not know 'q'). */
 typedef enum {
     BTN_PLAY, BTN_STEP, BTN_RESET, BTN_EDIT, BTN_JUMP,
     BTN_SAVE, BTN_LOAD, BTN_HELP, BTN_QUIT,
@@ -166,7 +169,7 @@ typedef enum {
 } Button;
 
 static const char *const BUTTON_LABELS[BTN_COUNT] = {
-    " Play/Pause (P) ", " Step (N) ", " Reset (R) ", " Edit (E) ", " Jump (J) ",
+    " Start (P) ", " Step (N) ", " Reset (R) ", " Edit (E) ", " Jump (J) ",
     " Save (S) ", " Load (L) ", " Help (?) ", " Quit (Q) "};
 
 /* Compact labels (no " (X)" shortcut suffix, no surrounding pad) used when the
@@ -174,7 +177,7 @@ static const char *const BUTTON_LABELS[BTN_COUNT] = {
    renderer, the geometry/hit-test, and the click-flash all pick the same array
    from the current width (see bar_labels), so they never disagree within a frame. */
 static const char *const BUTTON_LABELS_SHORT[BTN_COUNT] = {
-    "Play/Pause", "Step", "Reset", "Edit", "Jump",
+    "Start", "Step", "Reset", "Edit", "Jump",
     "Save", "Load", "Help", "Quit"};
 
 typedef struct {
@@ -260,12 +263,12 @@ typedef struct {
     /* Yes/No hit boxes (0-based), recomputed each confirm frame for the mouse. */
     int dlg_confirm_row, dlg_yes_c0, dlg_yes_c1, dlg_no_c0, dlg_no_c1;
 
-    /* Edit mouse (UI_EDIT): a bottom [Apply] [Discard] [Pan: x] button row, a
-       left-drag that paints cells (or pans the world when edit_pan is on), and the
-       paint stroke's state so motion events interpolate into a continuous line. */
+    /* Edit mouse (UI_EDIT): a bottom [Apply] [Discard] [Clear] [Pan: x] button
+       row, a left-drag that paints cells (or pans the world when edit_pan is on),
+       and the paint stroke's state so motion events interpolate into a line. */
     bool edit_pan;              /* when set, left-drag pans instead of painting */
     int edit_bar_row;           /* screen row of the Edit button row (-1 if none) */
-    int edit_c0[3], edit_c1[3]; /* [Apply][Discard][Pan] hit boxes (0-based cols) */
+    int edit_c0[4], edit_c1[4]; /* [Apply][Discard][Clear][Pan] hit boxes (0-based) */
     bool painting;              /* a left paint-stroke is in progress */
     bool paint_val;             /* value cells are set to for the current stroke */
     int paint_lx, paint_ly;     /* last painted world cell (stroke interpolation) */
@@ -580,6 +583,24 @@ static const char *const *bar_labels(int cols) {
                                                    : BUTTON_LABELS_SHORT;
 }
 
+/* The live text for the BTN_PLAY toggle: "Pause" while the sim is running,
+   "Start" otherwise. Both are five letters, so this is the same width as the
+   BTN_PLAY placeholder in BUTTON_LABELS / _SHORT — the bar layout and hit boxes
+   (computed from those static labels) stay valid regardless of run state.
+   `full` picks the padded/shortcut form to match the chosen label set. */
+static const char *play_label(const App *app, bool full) {
+    bool running = app->sim == SIM_RUNNING;
+    if (full) return running ? " Pause (P) " : " Start (P) ";
+    return running ? "Pause" : "Start";
+}
+
+/* The label to draw for button `b` from set `labels`: the BTN_PLAY toggle's live
+   text, or the static label for every other button. */
+static const char *button_label(const App *app, const char *const *labels, int b) {
+    if (b == BTN_PLAY) return play_label(app, labels == BUTTON_LABELS);
+    return labels[b];
+}
+
 /* The controls that sit *below* the world image: a centred button bar and, one
    blank row lower, a centred hint line. The status line moved to a HUD floating
    over the top of the world (see build_status / emit_frame). Drawn at absolute
@@ -591,22 +612,22 @@ static void append_controls(App *app, char *buf, size_t cap, size_t *n,
 
     if (app->mode == UI_EDIT) {
         /* Edit has its own clickable action row instead of the main menu bar:
-           [ Apply ]  [ Discard ]  [ Pan: on/off ] (Pan highlighted when active).
-           Records edit_bar_row / edit_c0..c1 for handle_edit_mouse. */
-        const char *eb[3] = {"[ Apply ]", "[ Discard ]",
+           [ Apply ] [ Discard ] [ Clear ] [ Pan: on/off ] (Pan highlighted when
+           active). Records edit_bar_row / edit_c0..c1 for handle_edit_mouse. */
+        const char *eb[4] = {"[ Apply ]", "[ Discard ]", "[ Clear ]",
                              app->edit_pan ? "[ Pan: on ]" : "[ Pan: off ]"};
         int tot = 0;
-        for (int i = 0; i < 3; i++) tot += (int)strlen(eb[i]);
-        tot += 2 * 2; /* two 2-space separators */
+        for (int i = 0; i < 4; i++) tot += (int)strlen(eb[i]);
+        tot += 3 * 2; /* three 2-space separators */
         int eleft = (cols - tot) / 2; if (eleft < 0) eleft = 0;
         app->edit_bar_row = img_rows + 1; /* 0-based, matches decoded mouse rows */
         appendf(buf, cap, n, "\033[%d;%dH", img_rows + 2, eleft + 1);
         int col = eleft;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             if (i) { appendf(buf, cap, n, "  "); col += 2; }
             app->edit_c0[i] = col;
             app->edit_c1[i] = col + (int)strlen(eb[i]);
-            if (i == 2 && app->edit_pan)
+            if (i == 3 && app->edit_pan)
                 appendf(buf, cap, n, ANSI_REVERSE "%s" ANSI_RESET, eb[i]);
             else
                 appendf(buf, cap, n, "%s", eb[i]);
@@ -625,10 +646,11 @@ static void append_controls(App *app, char *buf, size_t cap, size_t *n,
         bool show_sel = app->mode == UI_NORMAL || app->mode == UI_JUMP;
         for (int b = 0; b < BTN_COUNT; b++) {
             if (b) appendf(buf, cap, n, " ");
+            const char *lab = button_label(app, labels, b);
             if (show_sel && b == app->selected) {
-                appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, labels[b]);
+                appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, lab);
             } else {
-                appendf(buf, cap, n, "[%s]", labels[b]);
+                appendf(buf, cap, n, "[%s]", lab);
             }
         }
     }
@@ -645,7 +667,7 @@ static void append_controls(App *app, char *buf, size_t cap, size_t *n,
     } else if (app->mode == UI_EDIT) {
         snprintf(hint, sizeof(hint), app->edit_pan
                  ? "PAN mode: drag to pan   Wheel zoom   click [Pan] to draw again"
-                 : "Click/drag to draw   Wheel zoom   arrows+Space also work");
+                 : "Click/drag to draw   Wheel zoom   x clear   arrows+Space also work");
     } else {
         /* Only operations that are NOT on the menu bar (the bar carries its own
            shortcut letters); plus the Tab/Space menu-navigation aids. */
@@ -705,10 +727,11 @@ static void flash_selected_button(const App *app) {
     appendf(buf, sizeof(buf), &n, ANSI_RESET "\033[%d;%dH", app->bar_row + 1, bleft + 1);
     for (int b = 0; b < BTN_COUNT; b++) {
         if (b) appendf(buf, sizeof(buf), &n, " ");
+        const char *lab = button_label(app, labels, b);
         if (b == app->selected)
-            appendf(buf, sizeof(buf), &n, ANSI_REVERSE "[%s]" ANSI_RESET, labels[b]);
+            appendf(buf, sizeof(buf), &n, ANSI_REVERSE "[%s]" ANSI_RESET, lab);
         else
-            appendf(buf, sizeof(buf), &n, "[%s]", labels[b]);
+            appendf(buf, sizeof(buf), &n, "[%s]", lab);
     }
     fwrite(buf, 1, n, stdout);
     fflush(stdout);
@@ -976,10 +999,10 @@ static void render_dialog(App *app) {
         static const char *const help[] = {
             "",
             "Menu (click, or Tab/arrows then Space):",
-            "  Play/Pause (P)   run or pause",
+            "  Start/Pause (P)  run or pause",
             "  Step (N)         advance one generation",
             "  Reset (R)        back to generation 0",
-            "  Edit (E)         Space toggle, Enter apply, Esc discard",
+            "  Edit (E)         Space toggle, x clear, Enter apply, Esc discard",
             "  Jump (J)         leap to any generation",
             "  Save (S) / Load (L)   store / recall a pattern",
             "  Help (?)  Quit (Q)",
@@ -2042,10 +2065,11 @@ static void handle_edit_mouse(App *app) {
     if (m.button == 0 && m.pressed && !m.motion && app->edit_bar_row >= 0 &&
         m.y >= app->edit_bar_row - 1) {
         if (m.y == app->edit_bar_row) {
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 if (m.x >= app->edit_c0[i] && m.x < app->edit_c1[i]) {
                     if (i == 0) apply_edit(app);
                     else if (i == 1) discard_edit(app);
+                    else if (i == 2) engine_clear(app->engine); /* clear cells, stay in edit */
                     else app->edit_pan = !app->edit_pan;
                     break;
                 }
@@ -2105,6 +2129,14 @@ static void handle_edit(App *app, Key key) {
         }
         case KEY_ENTER: apply_edit(app); return;   /* keep the edits (gen 0) */
         case KEY_ESC:   discard_edit(app); return; /* restore the pre-edit world */
+        case KEY_OTHER:
+            /* x clears every cell but stays in Edit (Esc still restores the
+               pre-edit world, Enter commits the now-empty one). */
+            {
+                const int c = terminal_char();
+                if (c == 'x' || c == 'X') engine_clear(app->engine);
+            }
+            break;
         case KEY_QUIT:
             app->running = false;
             break;

@@ -84,6 +84,21 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Start/Pause label toggle + Edit "Clear" button.** Two UI touches:
+  - **BTN_PLAY now shows the *action*, not both names.** The button reads
+    `Start` while stopped/paused and `Pause` while running (was the static
+    `Play/Pause`). `Start`/`Pause` are both five letters, so the static
+    `BUTTON_LABELS` slot is a fixed-width stand-in that still gives the bar its
+    width and hit boxes; only the drawn text is swapped at render/flash time via
+    `play_label`/`button_label`. No layout jitter on toggle.
+  - **Edit mode gains a `[ Clear ]` button** (row is now `[ Apply ] [ Discard ]
+    [ Clear ] [ Pan: on/off ]`; `edit_c0/c1` widened to 4). `x`/`X` does the same
+    from the keyboard. Clear only `engine_clear`s the cells and *stays in Edit*,
+    so the transaction still holds: Esc restores the pre-edit world (even after a
+    clear), Enter commits the now-empty one. Distinct from Normal-mode `x`
+    (`clear_world`, which also resets the restart config + timeline).
+  PTY-verified: bar toggles Start↔Pause on `p`; Edit shows `[ Clear ]`; `x` and a
+  click both take Live 5→0; Esc after clear restores Live 5.
 - **(Fedora) Fix unbounded KGP memory growth + warning-clean dialogs.** Two fixes
   after pulling the KGP work:
   - **KGP no longer leaks images (was ~22 GB in Ghostty).** The encoder emitted
