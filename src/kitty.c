@@ -9,6 +9,11 @@
 #include <string.h>
 #include <zlib.h>
 
+/* Fixed KGP image + placement id reused every frame. Reusing one id (and
+   deleting it before each transmit) means the terminal replaces the image in
+   place instead of accumulating one per frame — see kitty_canvas_encode. */
+#define KGP_IMAGE_ID 1
+
 /* ---- pixel colours ----------------------------------------------------- */
 #define DEAD_R  10
 #define DEAD_G  10
@@ -110,8 +115,6 @@ void kitty_canvas_set_alive(KittyCanvas *c, int col, int row) {
     fill_rect(c, px, py, c->cell_px, c->cell_px, LIVE_R, LIVE_G, LIVE_B);
     /* Redraw the interior grid lines that the fill may have overwritten. */
     if (c->cell_px >= 5) {
-        for (int cc = col + 1; cc < c->cols && cc * c->cell_px < px + c->cell_px; cc++)
-            ; /* grid would be at multiples of cell_px; the fill is within one cell */
         /* Redraw the bottom and right inner grid edges of this cell. */
         int bx = (col + 1) * c->cell_px;
         if (bx < c->pw) {
@@ -292,18 +295,38 @@ char *kitty_canvas_encode(KittyCanvas *c, size_t *out_len) {
     free(zbuf);
     if (b64 == NULL) return NULL;
 
-    /* Build the KGP escape sequence (Kitty Graphics Protocol):
+    /* Build the KGP escape sequence (Kitty Graphics Protocol).
+
+       Memory bounding: we reuse a single fixed image id (KGP_IMAGE_ID) and
+       placement id every frame, and *delete the previous frame's image first*
+       (a=d,d=i,i=<id>). Without this the terminal allocates a fresh image +
+       placement per frame and never frees them — on a running simulation that
+       grows without bound (observed ~22 GB in Ghostty). The delete + transmit go
+       out in one write, so the terminal composites them together with no flash.
+
+       The delete comes first:
+       \033_G  a=d  action: delete
+               d=i,i=<id> delete the image with this id and its placements
+               q=2  suppress the terminal's OK/error acknowledgment
+       \033\   ST
+
+       Then the transmit + display:
        \033_G  a=T  action: transmit + display
                f=24 24-bit RGB, 8 bits per channel, no alpha
                s=<pw>,v=<ph> pixel dimensions
                o=z  payload is zlib-compressed
                z=-1 place the image behind text (so popups/HUD read on top)
                C=1  don't move the cursor after placing
+               i=<id>,p=<id> fixed image + placement id (replace, don't stack)
+               q=2  suppress the acknowledgment (an id makes the terminal reply
+                    with "OK" per frame, which would otherwise pollute stdin)
                ;<base64-encoded zlib-compressed payload>
        \033\   ST (string terminator, two bytes) */
-    char hdr[160];
+    char hdr[256];
     int hl = snprintf(hdr, sizeof(hdr),
-                      "\033_Ga=T,f=24,s=%d,v=%d,o=z,z=-1,C=1;", c->pw, c->ph);
+                      "\033_Ga=d,d=i,i=%d,q=2\033\\"
+                      "\033_Ga=T,f=24,s=%d,v=%d,o=z,z=-1,C=1,i=%d,p=%d,q=2;",
+                      KGP_IMAGE_ID, c->pw, c->ph, KGP_IMAGE_ID, KGP_IMAGE_ID);
 
     /* KGP string terminator is ESC \ (two bytes). */
     size_t total = (size_t)hl + b64_len + 2;

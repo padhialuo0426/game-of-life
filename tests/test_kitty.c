@@ -39,6 +39,12 @@ static void test_kitty_basic(void) {
     CHECK(strstr(img, "o=z") != NULL, "contains o=z (zlib compression)");
     CHECK(strstr(img, "z=-1") != NULL, "contains z=-1 (behind text)");
     CHECK(strstr(img, "C=1") != NULL, "contains C=1 (don't move cursor)");
+    /* Memory bounding: a fixed image id, an explicit delete of the previous
+       frame, and suppressed acknowledgments must all be present — without them
+       the terminal accumulates one image per frame (unbounded growth). */
+    CHECK(strstr(img, "a=d,d=i,i=1") != NULL, "deletes previous image (bounded mem)");
+    CHECK(strstr(img, "i=1") != NULL, "reuses a fixed image id");
+    CHECK(strstr(img, "q=2") != NULL, "suppresses per-frame OK reply");
 
     /* Check that it ends with ESC \ . */
     CHECK(len >= 2 && img[len-2] == '\033' && img[len-1] == '\\',

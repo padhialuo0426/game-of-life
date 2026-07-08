@@ -84,6 +84,25 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Fix unbounded KGP memory growth + warning-clean dialogs.** Two fixes
+  after pulling the KGP work:
+  - **KGP no longer leaks images (was ~22 GB in Ghostty).** The encoder emitted
+    `a=T` with *no image id* every frame, so the terminal allocated a fresh image
+    + placement per generation and never freed them — unbounded growth on a
+    running sim. `kitty_canvas_encode` now reuses a single fixed image/placement
+    id (`KGP_IMAGE_ID`) and prepends a delete of the previous frame
+    (`\033_Ga=d,d=i,i=1,q=2\033\\`) before the transmit, so the terminal replaces
+    the image in place. `q=2` on both the delete and the transmit suppresses the
+    per-frame `OK` acknowledgment an id would otherwise trigger (which would
+    pollute stdin). Delete + transmit go out in one write, composited together
+    with no flash. The dedup path (emit only when the image changed) still holds,
+    so idle frames cost nothing. New test assertions lock in the delete / fixed
+    id / `q=2` so the leak can't silently return.
+  - **Dropped a dead loop** in `kitty_canvas_set_alive` (an empty `for` whose
+    condition was never true) and **removed two `-Wformat-truncation` warnings**
+    in `dlg_title`/`dlg_dim` by appending straight through `appendf` (which
+    truncates safely on `cap - *n`) instead of a fixed-size `snprintf` temp.
+  Build is warning-clean; `test-kitty` passes with the new assertions.
 - **(Mac, Ghostty) Add Kitty Graphics Protocol (KGP) canvas with sixel fallback.**
   New `src/kitty.{c,h}` parallel to the sixel canvas: RGB pixel buffer → grid
   lines pre-drawn → live cells fill white cells → at encode-time cursor outline
