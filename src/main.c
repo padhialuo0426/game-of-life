@@ -200,6 +200,11 @@ typedef struct {
     int sx_last_w, sx_last_h;   /* last image pixel size (clear on change) */
     uint64_t sx_last_hash;      /* hash of the last emitted image bytes */
     bool sx_drawn;              /* an image has been emitted at least once */
+    bool text_dirty;            /* stale full-screen text (a closed dialog / the
+                                   too-small notice) to erase on the next KGP
+                                   frame — with per-row EL, never a 2J, which
+                                   would delete the image and flash (see
+                                   emit_frame) */
 
     /* Graphics protocol: prefer KGP when the terminal supports it, otherwise
        fall back to sixel. Set once at startup via terminal_query_kitty(). */
@@ -790,10 +795,16 @@ static void emit_frame(App *app, char *img, size_t img_len,
                                img_w != app->sx_last_w || img_h != app->sx_last_h;
     fputs(SYNC_BEGIN, stdout); /* present the whole frame at once (no flash) */
     if (image_changed) {
-        /* Clear the screen only when the image size changed (avoids leaving stale
-           pixels around a now-smaller image without flickering every frame). */
+        /* Sixel only: clear the screen when the image size changed — sixel
+           pixels persist on the cells they covered, so a now-smaller image
+           would leave stale pixels around it. Never do this on the KGP path:
+           ED 2 deletes the terminal's images, and the big payloads at 1px /
+           sub-pixel zoom decode too slowly to be re-placed in the same refresh,
+           so every zoom notch flashed the background through (KGP needs no
+           clear anyway — retransmitting the fixed id replaces the placement
+           wholesale, leaving nothing stale). */
         if (img_w != app->sx_last_w || img_h != app->sx_last_h) {
-            fputs(ANSI_CLEAR, stdout);
+            if (!app->use_kitty) fputs(ANSI_CLEAR, stdout);
             app->sx_last_w = img_w;
             app->sx_last_h = img_h;
         }
@@ -803,6 +814,21 @@ static void emit_frame(App *app, char *img, size_t img_len,
         app->sx_drawn = true;
     }
     free(img);
+
+    /* KGP: erase stale full-screen text (a just-closed dialog, the too-small
+       notice) row by row with EL, after the image is back on screen. EL erases
+       glyphs but — unlike ED 2 — leaves the graphics layer alone, and erased
+       cells are transparent over the z=-1 image, so the world shows through
+       where the dialog was. The sixel path handles the same situation with the
+       full clear above. */
+    if (app->use_kitty && app->text_dirty) {
+        char er[16 * 128];
+        size_t en = 0;
+        for (int r = 1; r <= rows && en + 16 < sizeof(er); r++)
+            appendf(er, sizeof(er), &en, "\033[%d;1H\033[K", r);
+        fwrite(er, 1, en, stdout);
+    }
+    app->text_dirty = false;
 
     /* Overlays floating on top of the world image, redrawn every frame so they
        stay current and survive an image repaint (which paints over them):
@@ -1147,9 +1173,11 @@ static void render_dialog(App *app) {
     fflush(stdout);
     free(buf);
 
-    /* Next normal frame must repaint the image the box covered. */
+    /* Next normal frame must repaint the image the box covered and erase the
+       dialog's text (KGP path; the sixel path's full clear covers it). */
     app->sx_drawn = false;
     app->sx_last_w = app->sx_last_h = -1;
+    app->text_dirty = true;
 }
 
 /* Draw a clean centred "terminal too small" notice on the alt screen, so a window
@@ -1170,6 +1198,7 @@ static void render_too_small(App *app, int cols, int rows, int min_cols) {
     fflush(stdout);
     app->sx_drawn = false;
     app->sx_last_w = app->sx_last_h = -1;
+    app->text_dirty = true;
 }
 
 /* Render the world: build the image straight from the sparse live-cell set,

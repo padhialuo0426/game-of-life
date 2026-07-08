@@ -84,6 +84,25 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Fix the remaining zoom flash on KGP: never ED-2 on the KGP path.**
+  Frame-by-frame analysis of a 60 fps screen recording (Konsole) showed the
+  flash frame had HUD + buttons but **no world image**: on a zoom notch the
+  image size changes, `emit_frame` issued a full `\033[2J`, and ED 2 deletes
+  the terminal's KGP images — the big payloads at ≤2px zoom (worst compression)
+  decode too slowly to be re-placed in the same refresh, so the background
+  showed through for one frame. Chunky zoom levels compress well enough to win
+  the race, which is why only low zoom flashed. Fixes:
+  - The size-change screen clear in `emit_frame` is now **sixel-only** (sixel
+    pixels persist on cells, so a smaller image needs it; KGP retransmission
+    replaces the placement wholesale and needs no clear at all).
+  - Stale full-screen text (a closed dialog, the too-small notice) is erased on
+    the next KGP frame by a new `App.text_dirty` flag: per-row `EL` (`\033[K`)
+    after the image is back — EL leaves the graphics layer alone, and erased
+    cells are transparent over the z=-1 image. The sixel path still uses the
+    full clear for this.
+  PTY-verified: KGP zoom across the whole ladder (14 notches into sub-pixel)
+  emits **zero** `2J`; dialog close emits no `2J`, 40 EL rows + one retransmit;
+  sixel path unchanged (still clears on size change).
 - **(Fedora) Fix per-frame KGP background flash: replace in place, don't
   delete-then-transmit.** The KGP memory fix (2dee5f1) prepended an explicit
   delete (`a=d,d=i`) before every transmit; between the delete and the new
