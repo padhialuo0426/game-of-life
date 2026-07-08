@@ -125,6 +125,11 @@ static const char *SGR_WARN = "\033[33m";     /* yellow — paused */
    interval (see run_forward / JUMP_SERVICE_MS) so a long jump never freezes the
    UI and quit is honoured mid-jump. */
 #define HISTORY_CAP 1024
+/* Byte budget for the ring: each snapshot costs 8 bytes per live cell, so 1024
+   snapshots of a large world would otherwise grow to many GB (a 1.5M-cell
+   pattern is ~12 MB per snapshot). Over budget the ring frees its oldest
+   snapshots first; deep rewinds then replay from gen 0 instead of recalling. */
+#define HISTORY_BUDGET_BYTES (256UL * 1024 * 1024)
 #define JUMP_FIELD_MAX 1000000000L /* cap the typed target to keep it sane */
 
 /* Runtime speed control: the per-generation delay moves in fixed SPEED_STEP_MS
@@ -1814,17 +1819,22 @@ static void activate_button_at(App *app, int b) {
             history_clear(app->history);
             break;
         case BTN_EDIT:
+            /* Snapshot the world so Esc can Discard the session's edits; Enter
+               Applies (keeps them). Refuse to enter Edit if the snapshot cannot
+               be taken (OOM) — otherwise Discard would "restore" an empty world. */
+            engine_snapshot_free(app->edit_backup);
+            app->edit_backup = engine_snapshot(app->engine);
+            if (app->edit_backup == NULL) {
+                popup_show(&app->popup, "Cannot enter Edit: out of memory");
+                break;
+            }
+            app->edit_backup_gen = app->gen;
             app->mode = UI_EDIT;
             app->selected = BTN_EDIT; /* keep the highlight on Edit while editing */
             app->sim = SIM_STOPPED;
             app->blink_on = true;
             app->edit_pan = false;    /* start in draw mode, not pan */
             app->painting = false;
-            /* Snapshot the world so Esc can Discard the session's edits; Enter
-               Applies (keeps them). */
-            engine_snapshot_free(app->edit_backup);
-            app->edit_backup = engine_snapshot(app->engine);
-            app->edit_backup_gen = app->gen;
             /* Start the cursor at the centre of the current view. */
             app->cursor_x = app->cam_x + app->view_w / 2;
             app->cursor_y = app->cam_y + app->view_h / 2;
@@ -2052,12 +2062,16 @@ static void apply_edit(App *app) {
     app->mode = UI_NORMAL;
 }
 
-/* Discard the edits: restore the world captured when edit mode began. */
+/* Discard the edits: restore the world captured when edit mode began. A NULL
+   backup (cannot happen via BTN_EDIT, which refuses to enter without one) just
+   leaves the world as-is rather than "restoring" an empty one. */
 static void discard_edit(App *app) {
-    engine_restore(app->engine, app->edit_backup);
-    app->gen = app->edit_backup_gen;
-    engine_snapshot_free(app->edit_backup);
-    app->edit_backup = NULL;
+    if (app->edit_backup != NULL) {
+        engine_restore(app->engine, app->edit_backup);
+        app->gen = app->edit_backup_gen;
+        engine_snapshot_free(app->edit_backup);
+        app->edit_backup = NULL;
+    }
     app->sim = SIM_STOPPED;
     app->mode = UI_NORMAL;
 }
@@ -2635,7 +2649,7 @@ int main(int argc, char **argv) {
     app.use_kitty = has_kitty;
 
     app.engine = engine_new();
-    app.history = history_new(HISTORY_CAP);
+    app.history = history_new(HISTORY_CAP, HISTORY_BUDGET_BYTES);
     app.restart = NULL;
     if (app.engine == NULL || app.history == NULL) {
         fprintf(stderr, "Failed to allocate world engine\n");

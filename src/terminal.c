@@ -129,8 +129,20 @@ static Key decode_escape(void) {
         case 'B': return KEY_DOWN;
         case 'C': return KEY_RIGHT;
         case 'D': return KEY_LEFT;
-        default:  return KEY_OTHER;
+        default:  break;
     }
+    /* Unrecognised CSI (Delete = ESC [ 3 ~, modified arrows = ESC [ 1 ; 5 C,
+       F-keys, …): consume the rest of the sequence — parameter/intermediate
+       bytes are 0x20..0x3F, the final byte is 0x40..0x7E — so its tail bytes
+       do not leak into the input stream as literal characters (they would be
+       typed into the Save/path text fields otherwise). */
+    if (c0 == '[') {
+        char cc = c1;
+        while (cc >= 0x20 && cc <= 0x3f) {
+            if (!read_byte_timed(&cc)) break;
+        }
+    }
+    return KEY_OTHER;
 }
 
 Key terminal_read_key(int timeout_ms) {

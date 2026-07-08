@@ -9,12 +9,17 @@
 /* A bounded ring of engine snapshots tagged by generation, giving cheap rewind
    to a recent generation without recomputing. It retains the most recent
    `capacity` recorded generations; recording past that discards (and frees) the
-   oldest. Engine-agnostic — it only stores opaque EngineSnapshots. */
+   oldest. Retention is also bounded by a total byte budget: when the retained
+   snapshots exceed `budget_bytes`, the oldest are freed first (the newest is
+   always kept), so a huge world cannot run the process out of memory — deep
+   rewinds then replay from an earlier base instead. Engine-agnostic — it only
+   stores opaque EngineSnapshots. */
 typedef struct History History;
 
-/* Create a ring holding up to `capacity` generations / release one. Returns
-   NULL on allocation failure (capacity 0 is treated as 1). */
-History *history_new(size_t capacity);
+/* Create a ring holding up to `capacity` generations within `budget_bytes`
+   (0 = unlimited) / release one. Returns NULL on allocation failure (capacity 0
+   is treated as 1). */
+History *history_new(size_t capacity, size_t budget_bytes);
 void history_free(History *h);
 
 /* Drop all retained snapshots (e.g. after an edit changes the timeline). */

@@ -142,7 +142,10 @@ bool settings_load(Settings *s) {
     }
     if ((p = find_value(buf, "delay_ms")) != NULL) {
         long v = strtol(p, NULL, 10);
-        if (v >= 0) s->delay_ms = (int)v;
+        /* Clamp a hand-edited value: an over-large one would truncate through
+           (int) — possibly to a negative — and a negative poll timeout blocks
+           forever. Same 1-hour cap as the CLI's MAX_DELAY_MS. */
+        if (v >= 0) s->delay_ms = v > 3600000 ? 3600000 : (int)v;
     }
     if ((p = find_value(buf, "density")) != NULL) {
         double v = strtod(p, NULL);

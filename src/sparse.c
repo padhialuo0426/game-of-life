@@ -399,7 +399,10 @@ static bool sparse_step_parallel(SparseWorld *w) {
 
         Map counts, res;
         bool tok = map_init(&counts, pow2_cap((w->live.len / (size_t)T + 1) * 4), true);
-        if (tok) tok = map_init(&res, 64, false);
+        if (tok) {
+            tok = map_init(&res, 64, false);
+            if (!tok) map_free(&counts); /* res failed: don't leak counts */
+        }
         if (!tok) {
             #pragma omp atomic write
             ok = false;

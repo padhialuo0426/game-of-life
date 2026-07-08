@@ -42,6 +42,14 @@ static void cells_add(Cells *c, int x, int y) {
 /* Load                                                               */
 /* ------------------------------------------------------------------ */
 
+/* Hard limits so a corrupt or hostile file cannot hang the program or overflow
+   the pen coordinates: no single run longer than RLE_RUN_MAX, no more than
+   RLE_CELLS_MAX live cells in total, and the pen stays within RLE_COORD_MAX
+   (comfortably inside int — the sparse world itself clamps at 2^30). */
+#define RLE_RUN_MAX    10000000L   /* 10M cells per run token */
+#define RLE_CELLS_MAX  10000000UL  /* 10M live cells per pattern */
+#define RLE_COORD_MAX  (1L << 30)
+
 bool rle_load(const char *path, int **cells, size_t *count,
               char *err, size_t errcap) {
     *cells = NULL;
@@ -82,7 +90,7 @@ bool rle_load(const char *path, int **cells, size_t *count,
         at_line_start = false;
 
         if (ch >= '0' && ch <= '9') {
-            run = run * 10 + (ch - '0');
+            if (run <= RLE_RUN_MAX) run = run * 10 + (ch - '0'); /* saturate */
             have_run = true;
             continue;
         }
@@ -91,15 +99,22 @@ bool rle_load(const char *path, int **cells, size_t *count,
         run = 0;
         have_run = false;
 
+        /* Reject rather than loop/overflow on an absurd run or pen position:
+           a corrupt file must fail cleanly, never hang or wrap coordinates. */
+        bool bad = n > RLE_RUN_MAX;
         switch (ch) {
             case 'b': case 'B': /* dead run */
+                if (bad || (long)cx + n > RLE_COORD_MAX) { c.count = 0; done = false; goto malformed; }
                 cx += (int)n;
                 break;
             case 'o': case 'O': /* live run */
+                if (bad || (long)cx + n > RLE_COORD_MAX ||
+                    c.count + (size_t)n > RLE_CELLS_MAX) { c.count = 0; done = false; goto malformed; }
                 for (long i = 0; i < n; i++) cells_add(&c, cx + (int)i, cy);
                 cx += (int)n;
                 break;
             case '$': /* end of line(s) */
+                if (bad || (long)cy + n > RLE_COORD_MAX) { c.count = 0; done = false; goto malformed; }
                 cy += (int)n;
                 cx = 0;
                 break;
@@ -112,6 +127,7 @@ bool rle_load(const char *path, int **cells, size_t *count,
         }
         if (c.oom) break;
     }
+malformed:
 
     fclose(f);
 

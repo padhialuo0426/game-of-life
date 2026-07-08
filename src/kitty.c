@@ -182,7 +182,8 @@ static uint8_t *cursor_save_and_draw(KittyCanvas *c, int *nbytes) {
     int cy = c->cur_row * c->cell_px;
     int cw_px = c->cell_px, ch_px = c->cell_px;
 
-    /* Count pixels in the outline. */
+    /* Count pixels in the outline (an upper bound is fine; the write pass below
+       applies the same overlap guards, so `saved` never exceeds `count`). */
     int count = 0;
     /* top + bottom strips */
     for (int dx = 0; dx < cw_px; dx++) {
@@ -223,7 +224,11 @@ static uint8_t *cursor_save_and_draw(KittyCanvas *c, int *nbytes) {
                 saved++;
             }
             int py_bot = cy + ch_px - 1 - ty;
-            if (py_bot >= 0 && py_bot < c->ph) {
+            /* py_bot >= cy + t: when cell_px <= 2t the bottom strip would
+               overlap the top one; saving a pixel twice would make the ordered
+               restore re-apply the first save's cursor colour (canvas corrupted
+               for a re-encode). Skip pixels the top strip already saved. */
+            if (py_bot >= cy + t && py_bot < c->ph) {
                 size_t off = ((size_t)py_bot * c->pw + (size_t)px) * 3;
                 memcpy(wp, &off, sizeof(size_t)); wp += sizeof(size_t);
                 *wp++ = c->pixels[off]; *wp++ = c->pixels[off+1]; *wp++ = c->pixels[off+2];
@@ -245,7 +250,8 @@ static uint8_t *cursor_save_and_draw(KittyCanvas *c, int *nbytes) {
                 saved++;
             }
             int px_r = cx + cw_px - 1 - tx;
-            if (px_r >= 0 && px_r < c->pw) {
+            /* px_r >= cx + t: same non-overlap guard against the left strip. */
+            if (px_r >= cx + t && px_r < c->pw) {
                 size_t off = ((size_t)py * c->pw + (size_t)px_r) * 3;
                 memcpy(wp, &off, sizeof(size_t)); wp += sizeof(size_t);
                 *wp++ = c->pixels[off]; *wp++ = c->pixels[off+1]; *wp++ = c->pixels[off+2];
@@ -254,8 +260,11 @@ static uint8_t *cursor_save_and_draw(KittyCanvas *c, int *nbytes) {
             }
         }
     }
+    /* Store the number of entries actually written — the up-front `count` is
+       only an upper bound for sizing the buffer (the write pass applies extra
+       clipping/overlap guards). cursor_restore replays exactly this many. */
+    memcpy(buf, &saved, sizeof(int));
     *nbytes = (int)(wp - buf);
-    (void)saved;
     return buf;
 }
 

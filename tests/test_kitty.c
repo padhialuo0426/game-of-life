@@ -90,6 +90,31 @@ static void test_kitty_empty(void) {
     kitty_canvas_free(kc);
 }
 
+/* At cell_px <= 2*outline-thickness the cursor outline's strips overlap; the
+   save/restore must not save a pixel twice (an ordered restore would re-apply
+   the first save's cursor colour and corrupt the canvas). Encoding twice must
+   give identical bytes. */
+static void test_kitty_cursor_small_cell(void) {
+    for (int px = 1; px <= 5; px++) {
+        KittyCanvas *kc = kitty_canvas_new(3, 3, px);
+        CHECK(kc != NULL, "3x3 canvas (small cell_px)");
+        if (kc == NULL) return;
+        kitty_canvas_set_alive(kc, 1, 1);
+        kitty_canvas_set_cursor(kc, 1, 1);
+        size_t l1 = 0, l2 = 0;
+        char *a = kitty_canvas_encode(kc, &l1);
+        char *b = kitty_canvas_encode(kc, &l2);
+        CHECK(a != NULL && b != NULL, "both encodes succeed");
+        if (a != NULL && b != NULL) {
+            CHECK(l1 == l2 && memcmp(a, b, l1) == 0,
+                  "re-encode identical (cursor restore is exact)");
+        }
+        free(a);
+        free(b);
+        kitty_canvas_free(kc);
+    }
+}
+
 static void test_kitty_out_of_range(void) {
     KittyCanvas *kc = kitty_canvas_new(3, 3, 5);
     CHECK(kc != NULL, "3x3 canvas");
@@ -126,6 +151,7 @@ static void test_sixel_still_works(void) {
 int main(void) {
     test_kitty_basic();
     test_kitty_empty();
+    test_kitty_cursor_small_cell();
     test_kitty_out_of_range();
     test_sixel_still_works();
     fprintf(stderr, "\n%d failures\n", failures);
