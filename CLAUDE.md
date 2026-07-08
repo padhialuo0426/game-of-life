@@ -78,6 +78,69 @@ so the installed `~/.local/bin` binary stays current for the user to test.
 
 ## Changes made this session (newest first, by commit)
 
+- **(Mac, tui-design review) Mouse-only dialogs, Edit paint, Jump wheel/pan.**
+  Three changes from a `tui-design` skill-guided review that made the secondary
+  pages fully mouse-operable.
+  - **Modal mouse exits — click outside or on a footer button to close.** Every
+    modal (Save/Load/Confirm) now has a close path that does not require Esc:
+    Save gained `[Save] [Cancel]` buttons; Load gained a `[Cancel]` button;
+    click-outside-the-box cancels all three (Confirm treated as No). Help already
+    dismissed on any click (fixed in a separate commit). The box geometry is
+    recorded in `App.dlg_box_*` each dialog frame; `dlg_click_outside`/
+    `dlg_action_hit` are shared helpers used by `handle_save_name`,
+    `handle_dialog_mouse`, and `handle_confirm_mouse`.
+  - **Edit mouse paint + Pan toggle.** A new `[Apply] [Discard] [Pan: on/off]`
+    button row replaces the menu bar during UI_EDIT. Left-click toggles a cell;
+    left-drag paints (value = opposite of the first cell, Bresenham-interpolated
+    so fast strokes leave no gaps). The Pan toggle switches left-drag between
+    paint and world-pan so patterns can be drawn beyond the visible area. The
+    wheel always zooms. `apply_edit`/`discard_edit` are extracted and shared by
+    the keyboard and button paths. `screen_cell_to_world` maps the pointer to
+    world coordinates.
+  - **Jump wheel-zoom + drag-pan.** `handle_jump` now accepts KEY_MOUSE: the
+    wheel zooms and a left-drag pans the world behind the prompt, then clicking
+    the Jump button executes and clicking any other bar button cancels and runs
+    that action. Number entry stays on the keyboard.
+  PTY-verified: single-click toggle on/off, drag paints a line, [Pan] toggles,
+  [Apply] exits, click-outside closes Save/Load, Jump wheel zooms from 10px→6px.
+- **(Mac, tui-design review) Rounded overlays, semantic colour, styled dialogs.**
+  Aesthetic pass over the HUD and dialogs (the second commit of the review).
+  - **Rounded Unicode borders** (`╭─╮ │ ╰─╯`) for every floating overlay — modal
+    dialogs and the popup toast — replacing ASCII `+---+` and asterisks.
+    `overlay_box` builds the multibyte horizontal run once and reuses it per row.
+  - **Semantic colour, honouring NO_COLOR.** Top HUD: `State` coloured by
+    run-state (green/yellow/dim), `Follow` accented when on, `Cam/Zoom/Delay`
+    dimmed as secondary. `build_status` has a styled form whose *visible width*
+    matches the plain form (SGR-emitted text strips to the same bytes), so
+    centring is unaffected; the styled version is used only when the line fits
+    without truncation. Under `NO_COLOR` the colour tokens are emptied but
+    bold/dim attributes and the overlay background are kept.
+  - **Dialog polish:** bold-cyan titles (`dlg_title`), dimmed secondary text
+    (`dlg_dim` for folder paths, footer hints, placeholders, table header), Load
+    sort arrow `▲/▼` on the active column with precise hit boxes, Load item
+    count, Save/Help footer hints anchored to the box bottom.
+  PTY-verified: `╭` present / `+---` gone, styled HUD strips to identical
+  visible text, `NO_COLOR` suppresses colour but keeps bold+dim.
+- **(Mac, tui-design review) Crash-safe terminal restore, responsive bar,
+  too-small notice, Help click fix.** Four robustness fixes (the first commit
+  of the review).
+  - **Restore the terminal on a crash.** SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE
+    now run `on_crash` (show cursor, leave alt screen, then `raise` with
+    `SIG_DFL`) so a crash no longer strands the terminal in raw mode — `atexit`
+    does not run for signal-killed processes. PTY verified: alt screen off,
+    cursor shown, process still re-raises SIGSEGV with correct signal 11.
+  - **Responsive button bar.** The 9-button bar (~123 cols) overflows 80–120-col
+    terminals; `bar_labels(cols)` picks compact labels
+    (`BUTTON_LABELS_SHORT`, ~69 cols) when the full set would not fit. Shared by
+    the renderer, geometry/hit-test, and click-flash so they stay in agreement.
+    The hint line truncates to width.
+  - **Terminal-too-small notice.** `render()` silently skipped the frame when the
+    grid was too small; it now shows a centred "Terminal too small (need NNxN)"
+    message (the floor is `labels_bar_width(BUTTON_LABELS_SHORT)` ×
+    `MIN_USABLE_ROWS`). PTY verified: notice shown at 40 cols.
+  - **Help no longer closes on the opening click's release.** `handle_help`
+    dismisses only on a real key or a fresh mouse press; the release and motion
+    events of the opening click are ignored.
 - **(Fedora) Keep the selected button lit in Edit/Jump + transactional Edit
   (Space/Enter/Esc).** Two fixes:
   - **Highlight no longer vanishes** when a click enters Edit or Jump. Those modes
