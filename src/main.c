@@ -250,6 +250,23 @@ typedef struct {
     /* Yes/No hit boxes (0-based), recomputed each confirm frame for the mouse. */
     int dlg_confirm_row, dlg_yes_c0, dlg_yes_c1, dlg_no_c0, dlg_no_c1;
 
+    /* Edit mouse (UI_EDIT): a bottom [Apply] [Discard] [Pan: x] button row, a
+       left-drag that paints cells (or pans the world when edit_pan is on), and the
+       paint stroke's state so motion events interpolate into a continuous line. */
+    bool edit_pan;              /* when set, left-drag pans instead of painting */
+    int edit_bar_row;           /* screen row of the Edit button row (-1 if none) */
+    int edit_c0[3], edit_c1[3]; /* [Apply][Discard][Pan] hit boxes (0-based cols) */
+    bool painting;              /* a left paint-stroke is in progress */
+    bool paint_val;             /* value cells are set to for the current stroke */
+    int paint_lx, paint_ly;     /* last painted world cell (stroke interpolation) */
+
+    /* Modal-box geometry (0-based screen rect) and footer action buttons, so a
+       click outside the box cancels and the [action]/[Cancel] footer is clickable.
+       dlg_ok is the affirmative action (its span is empty when a dialog has none,
+       e.g. Load/Help). Set each dialog frame in render_dialog. */
+    int dlg_box_x0, dlg_box_y0, dlg_box_w, dlg_box_h;
+    int dlg_act_row, dlg_ok_c0, dlg_ok_c1, dlg_cancel_c0, dlg_cancel_c1;
+
     /* Left-drag panning. While the left button is held, the camera is recomputed
        from the anchor captured on press so the grabbed point stays under the
        cursor. */
@@ -554,26 +571,51 @@ static const char *const *bar_labels(int cols) {
    over the top of the world (see build_status / emit_frame). Drawn at absolute
    positions (cursor is at the row just below the image on entry): wipe the whole
    controls area first, then place the two centred rows. */
-static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
+static void append_controls(App *app, char *buf, size_t cap, size_t *n,
                             int img_rows, int cols) {
     appendf(buf, cap, n, ANSI_CLR_BELOW);
 
-    /* Button bar, centred on the row one blank line below the image. Labels shrink
-       to their compact form when the full bar would not fit the width. */
-    const char *const *labels = bar_labels(cols);
-    int bleft = (cols - labels_bar_width(labels)) / 2; if (bleft < 0) bleft = 0;
-    appendf(buf, cap, n, "\033[%d;%dH", img_rows + 2, bleft + 1);
-    /* Highlight the selected button in world view (Normal) and while its own modal
-       mode is active (Edit/Jump) — a click that entered that mode should not make
-       the cursor vanish from the button it landed on. */
-    bool show_sel = app->mode == UI_NORMAL || app->mode == UI_EDIT ||
-                    app->mode == UI_JUMP;
-    for (int b = 0; b < BTN_COUNT; b++) {
-        if (b) appendf(buf, cap, n, " ");
-        if (show_sel && b == app->selected) {
-            appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, labels[b]);
-        } else {
-            appendf(buf, cap, n, "[%s]", labels[b]);
+    if (app->mode == UI_EDIT) {
+        /* Edit has its own clickable action row instead of the main menu bar:
+           [ Apply ]  [ Discard ]  [ Pan: on/off ] (Pan highlighted when active).
+           Records edit_bar_row / edit_c0..c1 for handle_edit_mouse. */
+        const char *eb[3] = {"[ Apply ]", "[ Discard ]",
+                             app->edit_pan ? "[ Pan: on ]" : "[ Pan: off ]"};
+        int tot = 0;
+        for (int i = 0; i < 3; i++) tot += (int)strlen(eb[i]);
+        tot += 2 * 2; /* two 2-space separators */
+        int eleft = (cols - tot) / 2; if (eleft < 0) eleft = 0;
+        app->edit_bar_row = img_rows + 1; /* 0-based, matches decoded mouse rows */
+        appendf(buf, cap, n, "\033[%d;%dH", img_rows + 2, eleft + 1);
+        int col = eleft;
+        for (int i = 0; i < 3; i++) {
+            if (i) { appendf(buf, cap, n, "  "); col += 2; }
+            app->edit_c0[i] = col;
+            app->edit_c1[i] = col + (int)strlen(eb[i]);
+            if (i == 2 && app->edit_pan)
+                appendf(buf, cap, n, ANSI_REVERSE "%s" ANSI_RESET, eb[i]);
+            else
+                appendf(buf, cap, n, "%s", eb[i]);
+            col += (int)strlen(eb[i]);
+        }
+    } else {
+        app->edit_bar_row = -1;
+        /* Button bar, centred on the row one blank line below the image. Labels
+           shrink to their compact form when the full bar would not fit the width. */
+        const char *const *labels = bar_labels(cols);
+        int bleft = (cols - labels_bar_width(labels)) / 2; if (bleft < 0) bleft = 0;
+        appendf(buf, cap, n, "\033[%d;%dH", img_rows + 2, bleft + 1);
+        /* Highlight the selected button in Normal, and while a world-overlay mode
+           (Jump) is active, so a click that entered that mode keeps the cursor on
+           the button it landed on. */
+        bool show_sel = app->mode == UI_NORMAL || app->mode == UI_JUMP;
+        for (int b = 0; b < BTN_COUNT; b++) {
+            if (b) appendf(buf, cap, n, " ");
+            if (show_sel && b == app->selected) {
+                appendf(buf, cap, n, ANSI_REVERSE "[%s]" ANSI_RESET, labels[b]);
+            } else {
+                appendf(buf, cap, n, "[%s]", labels[b]);
+            }
         }
     }
 
@@ -584,11 +626,12 @@ static void append_controls(const App *app, char *buf, size_t cap, size_t *n,
         snprintf(hint, sizeof(hint), "Jumping to generation %ld...   Esc to stop",
                  app->jump_target);
     } else if (app->mode == UI_JUMP) {
-        snprintf(hint, sizeof(hint), "Type a generation (forward or back)   "
-                 "Backspace delete   Enter jump   Esc cancel");
+        snprintf(hint, sizeof(hint), "Type a generation   Wheel zoom  Drag pan   "
+                 "Enter jump   Esc cancel");
     } else if (app->mode == UI_EDIT) {
-        snprintf(hint, sizeof(hint), "Arrows move cursor   Space toggle cell   "
-                 "Enter apply   Esc discard");
+        snprintf(hint, sizeof(hint), app->edit_pan
+                 ? "PAN mode: drag to pan   Wheel zoom   click [Pan] to draw again"
+                 : "Click/drag to draw   Wheel zoom   arrows+Space also work");
     } else {
         /* Only operations that are NOT on the menu bar (the bar carries its own
            shortcut letters); plus the Tab/Space menu-navigation aids. */
@@ -821,6 +864,28 @@ static void dlg_dim(char *buf, size_t cap, size_t *n, int cy, int cx, int line,
     dlg_row(buf, cap, n, cy, cx, line, t);
 }
 
+/* Draw a modal's clickable footer buttons on content-line `line`: an optional
+   affirmative [ok] (pass NULL to omit) followed by a [cancel], and record their
+   0-based screen hit boxes so the mouse can activate them. Gives every dialog a
+   visible mouse exit (the keyboard Enter/Esc still work). */
+static void dlg_actions(App *app, char *buf, size_t cap, size_t *n, int cy, int cx,
+                        int line, const char *ok, const char *cancel) {
+    app->dlg_act_row = cy + line;
+    app->dlg_ok_c0 = app->dlg_ok_c1 = -1;
+    char s[256];
+    int p = 0, col = cx;
+    if (ok != NULL) {
+        int w = (int)strlen(ok);
+        app->dlg_ok_c0 = col; app->dlg_ok_c1 = col + w;
+        p += snprintf(s + p, sizeof(s) - (size_t)p, "%s   ", ok);
+        col += w + 3;
+    }
+    int cw = (int)strlen(cancel);
+    app->dlg_cancel_c0 = col; app->dlg_cancel_c1 = col + cw;
+    snprintf(s + p, sizeof(s) - (size_t)p, "%s", cancel);
+    dlg_row(buf, cap, n, cy, cx, line, s);
+}
+
 /* Draw a centred modal window (save / load / confirm) as a black bordered box
    floating over the world image, and record the mouse hit boxes in screen
    coordinates. The world around the box is left untouched; the image the box
@@ -854,6 +919,11 @@ static void render_dialog(App *app) {
     app->bar_row = -1;
     app->dlg_sort_row = app->dlg_typepath_row = app->dlg_list_row0 = -1;
     app->dlg_confirm_row = -1;
+    app->dlg_act_row = app->dlg_ok_c0 = app->dlg_ok_c1 = -1;
+    app->dlg_cancel_c0 = app->dlg_cancel_c1 = -1;
+    /* Box rect (0-based) for click-outside-to-cancel. */
+    app->dlg_box_x0 = x0; app->dlg_box_y0 = y0;
+    app->dlg_box_w = w;   app->dlg_box_h = h;
 
     /* 1) Frame: black fill + rounded border, overlaid on the world (shared with
        the toast via overlay_box; 1-based coords, so the 0-based x0/y0 get +1). */
@@ -868,12 +938,14 @@ static void render_dialog(App *app) {
         snprintf(line, sizeof(line), "Save as: \033[7m%s \033[0m" DLG_BG
                  SGR_DIM ".rle", app->file_buf);
         dlg_row(buf, bcap, &n, cy, cx, 3, line);
-        /* Footer hint anchored to the box bottom; any result message just above. */
-        dlg_dim(buf, bcap, &n, cy, cx, chh - 1,
-                "Enter save    Esc cancel    (.rle added automatically)");
+        /* Clickable footer buttons (mouse exit) + dim keyboard hint above them;
+           any result message above that. */
+        dlg_actions(app, buf, bcap, &n, cy, cx, chh - 1, "[ Save ]", "[ Cancel ]");
+        dlg_dim(buf, bcap, &n, cy, cx, chh - 2,
+                "Enter save   Esc cancel   (.rle added automatically)");
         if (app->msg[0]) {
             snprintf(line, sizeof(line), "%.*s", cw, app->msg);
-            dlg_row(buf, bcap, &n, cy, cx, chh - 3, line);
+            dlg_row(buf, bcap, &n, cy, cx, chh - 4, line);
         }
     } else if (app->mode == UI_HELP) {
         /* A compact controls reference. Kept short so it fits the box on small
@@ -980,7 +1052,7 @@ static void render_dialog(App *app) {
         dlg_dim(buf, bcap, &n, cy, cx, 5, line);
 
         app->dlg_list_row0 = cy + 6;
-        int listvis = chh - 6 - 1; /* leave the footer row */
+        int listvis = chh - 6 - 2; /* leave the hint row + the button row */
         if (listvis < 1) listvis = 1;
         app->save_visible = listvis;
         if (app->save_sel < app->save_top) app->save_top = app->save_sel;
@@ -1009,8 +1081,9 @@ static void render_dialog(App *app) {
                 dlg_row(buf, bcap, &n, cy, cx, 6 + i, line);
             }
         }
-        dlg_dim(buf, bcap, &n, cy, cx, chh - 1,
+        dlg_dim(buf, bcap, &n, cy, cx, chh - 2,
                 "Up/Dn move  Enter/click load  d delete  / path  Esc cancel");
+        dlg_actions(app, buf, bcap, &n, cy, cx, chh - 1, NULL, "[ Cancel ]");
     }
 
     fwrite(buf, 1, n, stdout);
@@ -1640,6 +1713,8 @@ static void activate_button_at(App *app, int b) {
             app->selected = BTN_EDIT; /* keep the highlight on Edit while editing */
             app->sim = SIM_STOPPED;
             app->blink_on = true;
+            app->edit_pan = false;    /* start in draw mode, not pan */
+            app->painting = false;
             /* Snapshot the world so Esc can Discard the session's edits; Enter
                Applies (keeps them). */
             engine_snapshot_free(app->edit_backup);
@@ -1859,7 +1934,123 @@ static void follow_cursor(App *app) {
         app->cam_y = app->cursor_y - app->view_h + 1;
 }
 
+/* Apply the edits: the edited world becomes the new restart config and starts a
+   fresh timeline (generation 0). */
+static void apply_edit(App *app) {
+    engine_snapshot_free(app->restart);
+    app->restart = engine_snapshot(app->engine);
+    engine_snapshot_free(app->edit_backup);
+    app->edit_backup = NULL;
+    history_clear(app->history);
+    app->gen = 0;
+    app->sim = SIM_STOPPED;
+    app->mode = UI_NORMAL;
+}
+
+/* Discard the edits: restore the world captured when edit mode began. */
+static void discard_edit(App *app) {
+    engine_restore(app->engine, app->edit_backup);
+    app->gen = app->edit_backup_gen;
+    engine_snapshot_free(app->edit_backup);
+    app->edit_backup = NULL;
+    app->sim = SIM_STOPPED;
+    app->mode = UI_NORMAL;
+}
+
+/* Map a pointer at character-cell (mx,my) to the world cell under it — the inverse
+   of the render transform (cam + screen_px_to_world(pixel)). Falls back to a raw
+   cam offset if the terminal pixel size is unavailable. */
+static void screen_cell_to_world(const App *app, int mx, int my, int *wx, int *wy) {
+    int cols, rows, xpx, ypx;
+    if (terminal_size(&cols, &rows) && terminal_pixel_size(&xpx, &ypx) &&
+        xpx / cols > 0 && ypx / rows > 0) {
+        *wx = app->cam_x + screen_px_to_world(app, mx * (xpx / cols));
+        *wy = app->cam_y + screen_px_to_world(app, my * (ypx / rows));
+    } else {
+        *wx = app->cam_x + mx;
+        *wy = app->cam_y + my;
+    }
+}
+
+/* Set every cell on the line from (x0,y0) to (x1,y1) to `val` (Bresenham), so a
+   fast paint-drag leaves no gaps between motion events. */
+static void paint_line(App *app, int x0, int y0, int x1, int y1, bool val) {
+    int dx = abs(x1 - x0), dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        engine_set(app->engine, x0, y0, val);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* Edit-mode mouse: the wheel zooms; the [Apply]/[Discard]/[Pan] button row is
+   clickable; in the world area a left drag either paints cells (toggle-on-first-
+   cell, then that value along the stroke) or, when Pan is on, pans the view. */
+static void handle_edit_mouse(App *app) {
+    MouseEvent m = terminal_mouse();
+    if (m.button == 64 || m.button == 65) { /* wheel zoom */
+        if (m.pressed) zoom_infinite(app, m.button == 64 ? +1 : -1, m.x, m.y);
+        return;
+    }
+    /* A click on the Edit button row activates a button; clicks anywhere in the
+       controls strip never paint/pan the world. */
+    if (m.button == 0 && m.pressed && !m.motion && app->edit_bar_row >= 0 &&
+        m.y >= app->edit_bar_row - 1) {
+        if (m.y == app->edit_bar_row) {
+            for (int i = 0; i < 3; i++) {
+                if (m.x >= app->edit_c0[i] && m.x < app->edit_c1[i]) {
+                    if (i == 0) apply_edit(app);
+                    else if (i == 1) discard_edit(app);
+                    else app->edit_pan = !app->edit_pan;
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    if (app->edit_pan) { /* left-drag pans the world */
+        if (m.button == 0 && m.pressed && !m.motion) {
+            app->dragging = true;
+            app->drag_mx = m.x; app->drag_my = m.y;
+            app->drag_cam_x = app->cam_x; app->drag_cam_y = app->cam_y;
+        } else if (m.button == 0 && m.motion && app->dragging) {
+            int wdx, wdy;
+            screen_delta_to_world(app, m.x - app->drag_mx, m.y - app->drag_my,
+                                  &wdx, &wdy);
+            app->cam_x = app->drag_cam_x - wdx;
+            app->cam_y = app->drag_cam_y - wdy;
+        } else if (!m.pressed) {
+            app->dragging = false;
+        }
+        return;
+    }
+    /* Paint: press toggles the cell (and fixes the stroke value = its new state);
+       drag continues that value along the pointer path. */
+    if (m.button == 0 && m.pressed && !m.motion) {
+        int wx, wy;
+        screen_cell_to_world(app, m.x, m.y, &wx, &wy);
+        app->paint_val = !engine_get(app->engine, wx, wy);
+        engine_set(app->engine, wx, wy, app->paint_val);
+        app->painting = true;
+        app->paint_lx = wx; app->paint_ly = wy;
+        app->cursor_x = wx; app->cursor_y = wy;
+    } else if (m.button == 0 && m.motion && app->painting) {
+        int wx, wy;
+        screen_cell_to_world(app, m.x, m.y, &wx, &wy);
+        paint_line(app, app->paint_lx, app->paint_ly, wx, wy, app->paint_val);
+        app->paint_lx = wx; app->paint_ly = wy;
+        app->cursor_x = wx; app->cursor_y = wy;
+    } else if (!m.pressed) {
+        app->painting = false;
+    }
+}
+
 static void handle_edit(App *app, Key key) {
+    if (key == KEY_MOUSE) { handle_edit_mouse(app); return; }
     switch (key) {
         case KEY_LEFT:  app->cursor_x--; break;
         case KEY_RIGHT: app->cursor_x++; break;
@@ -1871,27 +2062,8 @@ static void handle_edit(App *app, Key key) {
             engine_set(app->engine, app->cursor_x, app->cursor_y, !alive);
             break;
         }
-        case KEY_ENTER:
-            /* Apply: keep the edits. The edited world becomes the new restart
-               config and starts a fresh timeline. */
-            engine_snapshot_free(app->restart);
-            app->restart = engine_snapshot(app->engine);
-            engine_snapshot_free(app->edit_backup);
-            app->edit_backup = NULL;
-            history_clear(app->history);
-            app->gen = 0;
-            app->sim = SIM_STOPPED;
-            app->mode = UI_NORMAL;
-            break;
-        case KEY_ESC:
-            /* Discard: restore the world captured when edit mode began. */
-            engine_restore(app->engine, app->edit_backup);
-            app->gen = app->edit_backup_gen;
-            engine_snapshot_free(app->edit_backup);
-            app->edit_backup = NULL;
-            app->sim = SIM_STOPPED;
-            app->mode = UI_NORMAL;
-            break;
+        case KEY_ENTER: apply_edit(app); return;   /* keep the edits (gen 0) */
+        case KEY_ESC:   discard_edit(app); return; /* restore the pre-edit world */
         case KEY_QUIT:
             app->running = false;
             break;
@@ -1901,8 +2073,48 @@ static void handle_edit(App *app, Key key) {
     follow_cursor(app);
 }
 
+/* Jump-mode mouse: the wheel zooms and a left drag pans the (static) world behind
+   the prompt so you can frame it; a click on the bar's Jump button executes the
+   jump, and a click on any other bar button cancels the jump and runs that action.
+   Number entry stays on the keyboard. */
+static void handle_jump_mouse(App *app) {
+    MouseEvent m = terminal_mouse();
+    if (m.button == 64 || m.button == 65) { /* wheel zoom */
+        if (m.pressed) zoom_infinite(app, m.button == 64 ? +1 : -1, m.x, m.y);
+        return;
+    }
+    if (m.button == 0 && m.pressed && !m.motion && app->bar_row >= 0 &&
+        m.y >= app->bar_row - 1) {
+        if (m.y == app->bar_row) {
+            for (int b = 0; b < BTN_COUNT; b++) {
+                if (m.x >= app->btn_col0[b] && m.x < app->btn_col1[b]) {
+                    long target = app->jump_field;
+                    app->mode = UI_NORMAL;
+                    if (b == BTN_JUMP) jump_to(app, target); /* execute */
+                    else { app->selected = b; activate_button(app); } /* switch */
+                    break;
+                }
+            }
+        }
+        return; /* clicks in the controls strip never pan */
+    }
+    if (m.button == 0 && m.pressed && !m.motion) {
+        app->dragging = true;
+        app->drag_mx = m.x; app->drag_my = m.y;
+        app->drag_cam_x = app->cam_x; app->drag_cam_y = app->cam_y;
+    } else if (m.button == 0 && m.motion && app->dragging) {
+        int wdx, wdy;
+        screen_delta_to_world(app, m.x - app->drag_mx, m.y - app->drag_my, &wdx, &wdy);
+        app->cam_x = app->drag_cam_x - wdx;
+        app->cam_y = app->drag_cam_y - wdy;
+    } else if (!m.pressed) {
+        app->dragging = false;
+    }
+}
+
 /* Type a target generation, then leap there (forward or backward). */
 static void handle_jump(App *app, Key key) {
+    if (key == KEY_MOUSE) { handle_jump_mouse(app); return; }
     switch (key) {
         case KEY_BACKSPACE:
             app->jump_field /= 10;
@@ -1979,6 +2191,23 @@ static void set_sort(App *app, SortKey k) {
 
 /* Mouse inside the load list: wheel scrolls the selection; a left click on a
    sort header, the type-a-path line, or an entry acts on it (a row click loads). */
+/* True if a left press landed outside the current modal box rect (0-based screen),
+   so a click on the world dismisses the dialog. */
+static bool dlg_click_outside(const App *app, const MouseEvent *m) {
+    return m->x < app->dlg_box_x0 || m->x >= app->dlg_box_x0 + app->dlg_box_w ||
+           m->y < app->dlg_box_y0 || m->y >= app->dlg_box_y0 + app->dlg_box_h;
+}
+
+/* Which footer button a left press hit: 1 = the affirmative [ok], -1 = [Cancel],
+   0 = neither. */
+static int dlg_action_hit(const App *app, const MouseEvent *m) {
+    if (m->y != app->dlg_act_row) return 0;
+    if (app->dlg_ok_c0 >= 0 && m->x >= app->dlg_ok_c0 && m->x < app->dlg_ok_c1)
+        return 1;
+    if (m->x >= app->dlg_cancel_c0 && m->x < app->dlg_cancel_c1) return -1;
+    return 0;
+}
+
 static void handle_dialog_mouse(App *app) {
     MouseEvent m = terminal_mouse();
     if (m.button == 64 || m.button == 65) { /* wheel */
@@ -1989,6 +2218,11 @@ static void handle_dialog_mouse(App *app) {
         return;
     }
     if (!(m.button == 0 && m.pressed && !m.motion) || app->load_typing) return;
+    /* [Cancel] button or a click outside the box closes the dialog. */
+    if (dlg_action_hit(app, &m) == -1 || dlg_click_outside(app, &m)) {
+        app->mode = UI_NORMAL;
+        return;
+    }
     if (m.y == app->dlg_sort_row) {
         for (int k = 0; k < 3; k++) {
             if (m.x >= app->dlg_sort_c0[k] && m.x < app->dlg_sort_c1[k]) {
@@ -2004,7 +2238,8 @@ static void handle_dialog_mouse(App *app) {
         app->file_buf[0] = '\0';
         return;
     }
-    if (app->dlg_list_row0 >= 0 && m.y >= app->dlg_list_row0) {
+    if (app->dlg_list_row0 >= 0 && m.y >= app->dlg_list_row0 &&
+        m.y < app->dlg_list_row0 + app->save_visible) {
         int idx = app->save_top + (m.y - app->dlg_list_row0);
         if (idx >= 0 && idx < app->save_count) {
             app->save_sel = idx;
@@ -2013,8 +2248,18 @@ static void handle_dialog_mouse(App *app) {
     }
 }
 
-/* UI_SAVE_NAME: type a name, Enter saves (may open an overwrite confirm). */
+/* UI_SAVE_NAME: type a name, Enter saves (may open an overwrite confirm). The
+   [Save]/[Cancel] footer buttons and a click outside the box give a mouse exit. */
 static void handle_save_name(App *app, Key key) {
+    if (key == KEY_MOUSE) {
+        MouseEvent m = terminal_mouse();
+        if (m.button == 0 && m.pressed && !m.motion) {
+            int hit = dlg_action_hit(app, &m);
+            if (hit == 1) { if (app->file_len > 0) request_save(app); return; }
+            if (hit == -1 || dlg_click_outside(app, &m)) { app->mode = UI_NORMAL; }
+        }
+        return;
+    }
     if (key == KEY_ENTER) {
         if (app->file_len > 0) request_save(app);
         return;
@@ -2068,6 +2313,8 @@ static void handle_load_list(App *app, Key key) {
 static void handle_confirm_mouse(App *app) {
     MouseEvent m = terminal_mouse();
     if (!(m.button == 0 && m.pressed && !m.motion)) return;
+    /* A click outside the box is "No" (cancel), like Esc. */
+    if (dlg_click_outside(app, &m)) { resolve_confirm(app, false); return; }
     if (m.y != app->dlg_confirm_row) return;
     if (m.x >= app->dlg_yes_c0 && m.x < app->dlg_yes_c1) {
         app->confirm_sel = 0;
