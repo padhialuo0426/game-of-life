@@ -2756,10 +2756,14 @@ int main(int argc, char **argv) {
             handle_key(&app, k);
         }
 
-        /* Auto-hide an expired popup and repaint the world where it floated. */
+        /* Auto-hide an expired popup and repaint the world where it floated.
+           text_dirty: on KGP the re-emitted image sits *behind* text, so the
+           toast's cells must be erased explicitly (the sixel path's size-change
+           clear covers it). */
         if (popup_expire(&app.popup)) {
             app.sx_drawn = false;
             app.sx_last_w = app.sx_last_h = -1;
+            app.text_dirty = true;
         }
 
         if (app.running) {
