@@ -2,3 +2,9 @@
 .vscode/
 .idea/
 .DS_Store
+
+# Local working notes for Claude Code (machine-local, not part of the project)
+/CLAUDE.md
+
+# Screen recordings dropped in for debugging
+*.webm
