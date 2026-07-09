@@ -56,8 +56,8 @@ cmake --build --preset release
   （遵循 `XDG_DATA_HOME`，与你自己的存档放在一起）
 
 ```sh
-cmake --build --preset release          # 先构建
-cmake --install build/release           # 安装
+cmake --build --preset release                   # 先构建
+cmake --build build/release --target install     # 安装
 
 cmake --build build/release --target uninstall   # 卸载
 ```
@@ -69,7 +69,7 @@ cmake --build build/release --target uninstall   # 卸载
 - 卸载删除可执行文件、当初安装的那批内置图案和 `settings.json`
   （目录变空则一并删除），**绝不动**你自己保存的图案。
 - 系统级安装：`cmake --preset release -DCMAKE_INSTALL_PREFIX=/usr/local`，
-  再 `sudo cmake --install build/release`。
+  再 `sudo cmake --build build/release --target install`。
 
 ## 运行
 

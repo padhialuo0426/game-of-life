@@ -72,8 +72,8 @@ Installation goes to the user's home by default (no root needed):
   alongside your own saved patterns)
 
 ```sh
-cmake --build --preset release          # build first
-cmake --install build/release           # install
+cmake --build --preset release                   # build first
+cmake --build build/release --target install     # install
 
 cmake --build build/release --target uninstall   # uninstall
 ```
@@ -87,7 +87,7 @@ Notes:
   and `settings.json` (plus the directories if they end up empty) — **never**
   your own saved patterns.
 - System-wide: `cmake --preset release -DCMAKE_INSTALL_PREFIX=/usr/local`,
-  then `sudo cmake --install build/release`.
+  then `sudo cmake --build build/release --target install`.
 
 ## Run
 
