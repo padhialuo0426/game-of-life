@@ -56,20 +56,26 @@ cmake --build --preset release
   （遵循 `XDG_DATA_HOME`，与你自己的存档放在一起）
 
 ```sh
-cmake --build --preset release                   # 先构建
-cmake --build build/release --target install     # 安装
+cmake --build --preset release                     # 先构建
+cmake --build build/release --target install-game   # 安装
 
-cmake --build build/release --target uninstall   # 卸载
+cmake --build build/release --target remove-game    # 卸载
 ```
 
 说明：
 
+- `install-game`/`remove-game` 是本项目在 CMakeLists.txt 里显式定义的目标（`install`
+  这个名字被 CMake 生成器保留，不能自定义，所以用这两个名字）；标准的
+  `cmake --install build/release` / `cmake --build build/release --target install`
+  仍然等价可用，只是不如这两个名字直观。
 - 确保 `~/.local/bin` 在 `PATH` 中，即可直接敲 `game-of-life` 运行。
 - 安装**绝不覆盖**你已有的同名图案（自定义的 `default.rle` 是安全的）。
 - 卸载删除可执行文件、当初安装的那批内置图案和 `settings.json`
   （目录变空则一并删除），**绝不动**你自己保存的图案。
 - 系统级安装：`cmake --preset release -DCMAKE_INSTALL_PREFIX=/usr/local`，
-  再 `sudo cmake --build build/release --target install`。
+  再 `sudo cmake --build build/release --target install-game`。即便用 `sudo`，
+  内置图案也会正确装到*你自己*的 `~/.local/share`，而不是 root 的——安装脚本
+  通过 `SUDO_USER` 识别真实发起安装的用户。
 
 ## 运行
 

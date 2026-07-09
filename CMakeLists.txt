@@ -16,8 +16,14 @@ endif()
 
 # Install to the user's home by default (~/.local) so `make install` needs no
 # root. Override with -DCMAKE_INSTALL_PREFIX=... for a system-wide install.
+# gol_real_home (see cmake/RealUserHome.cmake) resolves the invoking user's
+# real home even if this very configure step is itself run under `sudo`
+# (rare, but if it happens the plain $ENV{HOME} below would default the whole
+# install under /root instead of the person who will actually run the game).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/RealUserHome.cmake")
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-    set(CMAKE_INSTALL_PREFIX "$ENV{HOME}/.local"
+    gol_real_home(GOL_REAL_HOME)
+    set(CMAKE_INSTALL_PREFIX "${GOL_REAL_HOME}/.local"
         CACHE PATH "Install prefix (default: user-local)" FORCE)
 endif()
 
@@ -88,11 +94,21 @@ configure_file(
     @ONLY)
 install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/cmake_install_patterns.cmake")
 
+# A named, explicit alias for the generator's built-in `install` target
+# (which CMake reserves the name "install" for — add_custom_target(install ...)
+# is a hard configure error on every generator, so this target has to be
+# called something else). Both do exactly the same work; this one just gives
+# `cmake --build <dir> --target install-game` a visible, self-documenting
+# name in the CMakeLists.txt, mirroring `remove-game` below.
+add_custom_target(install-game
+    COMMAND ${CMAKE_COMMAND} --install "${CMAKE_CURRENT_BINARY_DIR}"
+    COMMENT "Installing game-of-life (executable + bundled patterns)")
+
 # --- Uninstall (removes the executable, bundled patterns, settings) ---------
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_uninstall.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake"
     @ONLY)
-add_custom_target(uninstall
+add_custom_target(remove-game
     COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake"
     COMMENT "Uninstalling game-of-life and its default config")

@@ -7,14 +7,24 @@
 # literal and evaluated when this script runs, so it respects the invoking
 # user's HOME / XDG_DATA_HOME.
 
+include("@CMAKE_CURRENT_SOURCE_DIR@/cmake/RealUserHome.cmake")
+
 # Install the bundled patterns (saves/*.rle, including the auto-loaded
 # default.rle) into the XDG *data* location's saves directory — where the
 # program looks when run without -f, and where the in-app Save/Load browses.
 # Kept separate from the config directory (settings) on purpose, and it never
 # clobbers a pattern the user already has (their own edits/saves are safe).
+#
+# A system-wide install (`sudo cmake --build ... --target install`, see the
+# README) runs this script as root: $ENV{HOME} would be /root, not the real
+# user's home, silently installing the patterns somewhere the program never
+# looks when that user later runs it un-elevated. gol_real_home() resolves the
+# actual invoking user's home via $SUDO_USER in that case (falling back to
+# plain $ENV{HOME} for a normal, non-sudo per-user install — unchanged).
 set(data_home "$ENV{XDG_DATA_HOME}")
 if(data_home STREQUAL "")
-    set(data_home "$ENV{HOME}/.local/share")
+    gol_real_home(real_home)
+    set(data_home "${real_home}/.local/share")
 endif()
 set(saves_dir "${data_home}/game-of-life/saves")
 
@@ -30,3 +40,27 @@ foreach(pat ${bundled})
         message(STATUS "Installed pattern: ${dest}")
     endif()
 endforeach()
+
+# Under sudo, files just created by file(INSTALL ...) above (including any new
+# parent directories) are owned by root, which would block the real user's own
+# process from later writing there (e.g. saving a pattern named "default").
+# Hand the whole game-of-life data subtree back to them. SUDO_UID/SUDO_GID are
+# set by sudo alongside SUDO_USER; a failed chown (e.g. this script re-run
+# without sudo, or a filesystem that doesn't support ownership) is non-fatal —
+# the files are still in the right place, just not re-owned.
+if(NOT "$ENV{SUDO_USER}" STREQUAL "" AND
+   NOT "$ENV{SUDO_UID}" STREQUAL "" AND NOT "$ENV{SUDO_GID}" STREQUAL "")
+    set(data_dir "${data_home}/game-of-life")
+    if(EXISTS "${data_dir}")
+        execute_process(
+            COMMAND chown -R "$ENV{SUDO_UID}:$ENV{SUDO_GID}" "${data_dir}"
+            RESULT_VARIABLE _chown_rc
+            ERROR_QUIET)
+        if(_chown_rc EQUAL 0)
+            message(STATUS "Reassigned ${data_dir} to $ENV{SUDO_USER} (was root under sudo)")
+        else()
+            message(WARNING "Could not chown ${data_dir} back to $ENV{SUDO_USER}; "
+                            "it may be owned by root")
+        endif()
+    endif()
+endif()

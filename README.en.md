@@ -72,14 +72,19 @@ Installation goes to the user's home by default (no root needed):
   alongside your own saved patterns)
 
 ```sh
-cmake --build --preset release                   # build first
-cmake --build build/release --target install     # install
+cmake --build --preset release                     # build first
+cmake --build build/release --target install-game   # install
 
-cmake --build build/release --target uninstall   # uninstall
+cmake --build build/release --target remove-game    # uninstall
 ```
 
 Notes:
 
+- `install-game`/`remove-game` are explicit custom targets defined in
+  CMakeLists.txt (CMake reserves the name `install` for the generator's own
+  target, so it can't be a custom target too); the standard
+  `cmake --install build/release` / `cmake --build build/release --target
+  install` still work identically, these names are just more descriptive.
 - Make sure `~/.local/bin` is on your `PATH` to run `game-of-life` directly.
 - Installing **never overwrites** a pattern you already have (a customised
   `default.rle` is safe).
@@ -87,7 +92,9 @@ Notes:
   and `settings.json` (plus the directories if they end up empty) — **never**
   your own saved patterns.
 - System-wide: `cmake --preset release -DCMAKE_INSTALL_PREFIX=/usr/local`,
-  then `sudo cmake --build build/release --target install`.
+  then `sudo cmake --build build/release --target install-game`. Even under
+  `sudo`, bundled patterns land in *your own* `~/.local/share`, not root's —
+  the install script identifies the real invoking user via `SUDO_USER`.
 
 ## Run
 

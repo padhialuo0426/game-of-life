@@ -3,6 +3,8 @@
 # @VAR@ tokens are substituted at configure time; ${...} / $ENV{...} are left
 # literal and evaluated when this script runs.
 
+include("@CMAKE_CURRENT_SOURCE_DIR@/cmake/RealUserHome.cmake")
+
 # --- Executable -------------------------------------------------------------
 set(exe "@CMAKE_INSTALL_FULL_BINDIR@/game-of-life")
 if(EXISTS "${exe}")
@@ -13,9 +15,13 @@ else()
 endif()
 
 # --- Config directory (respects HOME / XDG_CONFIG_HOME at run time) ----------
+# See RealUserHome.cmake: under `sudo make uninstall`, $ENV{HOME} is root's, so
+# the fallback below resolves the real invoking user's home instead (matching
+# where the fixed install script actually placed things).
 set(cfg_home "$ENV{XDG_CONFIG_HOME}")
 if(cfg_home STREQUAL "")
-    set(cfg_home "$ENV{HOME}/.config")
+    gol_real_home(real_home)
+    set(cfg_home "${real_home}/.config")
 endif()
 set(cfg_dir "${cfg_home}/game-of-life")
 
@@ -44,7 +50,8 @@ endif()
 # patterns; the saves and data directories are removed only if they end up empty.
 set(data_home "$ENV{XDG_DATA_HOME}")
 if(data_home STREQUAL "")
-    set(data_home "$ENV{HOME}/.local/share")
+    gol_real_home(real_home)
+    set(data_home "${real_home}/.local/share")
 endif()
 set(data_dir "${data_home}/game-of-life")
 set(saves_dir "${data_dir}/saves")
