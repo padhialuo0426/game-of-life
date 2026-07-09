@@ -850,10 +850,17 @@ static void emit_frame(App *app, char *img, size_t img_len,
     int svis = full; if (svis > maxw) svis = maxw;
     if (svis > app->hud_w) app->hud_w = svis; /* grow-only, no shrink artifacts */
     if (app->hud_w > maxw) app->hud_w = maxw;
-    /* Centre the bar on the top row: 1 lead + hud_w content + 1 trail space. */
+    /* Centre the bar on the top row: 1 lead + hud_w content + 1 trail space.
+       The text is centred *inside* the box too: the box is grow-only (so a
+       shrinking status never leaves a stale tail), and when the current string
+       is narrower than the box the slack is split evenly on both sides instead
+       of piling up as a right-hand blank. */
     int barw = app->hud_w + 2;
     int hstart = (cols - barw) / 2 + 1; if (hstart < 1) hstart = 1; /* 1-based */
+    int lead = (app->hud_w - svis) / 2;
+    int trail = app->hud_w - svis - lead;
     appendf(ov, sizeof(ov), &on, "\033[1;%dH" HUD_BG " ", hstart);
+    for (int i = 0; i < lead; i++) appendf(ov, sizeof(ov), &on, " ");
     if (full <= maxw) {
         /* Fits without truncation: draw the semantically-coloured version (same
            visible width as the plain text measured above). */
@@ -863,7 +870,7 @@ static void emit_frame(App *app, char *img, size_t img_len,
     } else {
         appendf(ov, sizeof(ov), &on, "%.*s", svis, status);
     }
-    for (int i = svis; i < app->hud_w; i++) appendf(ov, sizeof(ov), &on, " ");
+    for (int i = 0; i < trail; i++) appendf(ov, sizeof(ov), &on, " ");
     appendf(ov, sizeof(ov), &on, " " ANSI_RESET);
 
     /* Toast: a rounded box floating near the world's bottom-right, for a
@@ -2742,11 +2749,21 @@ int main(int argc, char **argv) {
         }
         Key key = terminal_read_key(timeout);
 
-        /* A window resize (SIGWINCH interrupts the poll above) is handled simply
-           by redrawing: the viewport is recomputed from the terminal size every
-           frame, so there is nothing to reallocate. */
+        /* A window resize (SIGWINCH interrupts the poll above): the viewport is
+           recomputed from the terminal size every frame, so nothing needs
+           reallocating — but the HUD, button bar and hint were drawn for the
+           OLD geometry and land elsewhere in the new one, leaving ghost text
+           over the world (the KGP image sits behind text; re-emitting it covers
+           nothing, and the controls' clear-below only wipes below the new
+           image). Force a full repaint: size-mismatch gives the sixel path its
+           screen clear, text_dirty gives the KGP path its per-row EL erase, and
+           hud_w resets so the HUD box re-fits the new width. */
         if (g_resized) {
             g_resized = 0;
+            app.sx_drawn = false;
+            app.sx_last_w = app.sx_last_h = -1;
+            app.text_dirty = true;
+            app.hud_w = 0;
         }
 
         if (app.mode == UI_EDIT) {

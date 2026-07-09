@@ -100,6 +100,19 @@ with its CMake target; it can be recovered from git history if wanted).
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Fix resize ghost text + centre the HUD string in its box.** A 60 fps
+  recording showed live window resizing stacking ~10 copies of the button bar,
+  hint and HUD over the world: text drawn for the old geometry lands elsewhere
+  in the new one, the KGP image sits *behind* text so re-emitting covers
+  nothing, `append_controls`' clear-below only wipes below the new image — and
+  the main loop's `g_resized` handler did nothing. It now forces a full repaint:
+  `sx_last_w=-1` (size-mismatch gives sixel its `2J`), `text_dirty=true` (KGP
+  per-row EL erase), and `hud_w=0` so the grow-only HUD box re-fits the new
+  width. Also the HUD **string is now centred inside its box** (slack split into
+  lead/trail padding instead of piling up as a right-hand blank) per user
+  request. PTY-verified: three live-resize steps each emit one retransmit +
+  full-screen EL erase (KGP) / a `2J` (sixel); after Gen grows to 4 digits and
+  Reset shrinks the status, lead==trail padding.
 - **(Fedora) Extract the pattern-install step into `cmake/cmake_install.cmake.in`.**
   The inline `install(CODE "...")` block (escaped-string CMake inside CMake) in
   CMakeLists.txt is now a real script file next to `cmake_uninstall.cmake.in`,
