@@ -100,6 +100,20 @@ with its CMake target; it can be recovered from git history if wanted).
 
 ## Changes made this session (newest first, by commit)
 
+- **(Fedora) Golly multi-state RLE support in `rle_load`.** The user's saves dir
+  is full of Golly exports that failed to load (e.g. `lava.rle`, a Generations
+  rule `12345/45678/8` written with `.`/`A` tags — the old parser knew only
+  `b`/`o` and loaded 0 cells). The loader now understands Golly's extended cell
+  encoding: `.` = state 0, `A`..`X` = states 1..24, `p`..`y` prefix + `A`..`X` =
+  states 25..240 (uppercase `B`/`O` are states 2/15 now, per Golly — no longer
+  aliases of `b`/`o`). The header's `rule = <name>` is parsed: **[R]History /
+  [R]Super** families mark once-alive cells with *even* states, so there only
+  odd states load as live; every other family loads any non-zero state as live.
+  Loading is still B3/S23 — exotic rules render their initial pattern but step
+  under Conway rules. Verified: unit tests (Generations / History / Super /
+  prefixed states / runs / canonical glider), the user's whole saves dir (77
+  files) batch-loads with no failures, and an in-app `-f lava.rle` PTY run
+  shows `Live: 1260`.
 - **(Fedora) Fix resize ghost text + centre the HUD string in its box.** A 60 fps
   recording showed live window resizing stacking ~10 copies of the button bar,
   hint and HUD over the world: text drawn for the old geometry lands elsewhere

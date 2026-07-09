@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strncasecmp */
 
 static void set_err(char *err, size_t cap, const char *msg) {
     if (err != NULL && cap > 0) {
@@ -68,6 +69,7 @@ bool rle_load(const char *path, int **cells, size_t *count,
     bool header_done = false; /* skipped the leading "x = ..." line yet? */
     bool done = false;        /* saw the '!' terminator */
     bool at_line_start = true;
+    bool odd_states_live = false; /* rule family maps odd states -> alive */
 
     int ch;
     while (!done && (ch = fgetc(f)) != EOF) {
@@ -77,10 +79,29 @@ bool rle_load(const char *path, int **cells, size_t *count,
             at_line_start = true;
             continue;
         }
-        /* The first non-comment line beginning with x/X is the header. */
+        /* The first non-comment line beginning with x/X is the header. Capture
+           it to read the rule name: [R]History / [R]Super rules mark dead cells
+           that were once alive with *even* states, so for those only the odd
+           states count as live; every other multi-state family (e.g.
+           Generations) treats any non-zero state as a live cell. */
         if (at_line_start && !header_done && (ch == 'x' || ch == 'X')) {
             header_done = true;
-            while ((ch = fgetc(f)) != EOF && ch != '\n') { }
+            char hdr[200];
+            size_t hn = 0;
+            while ((ch = fgetc(f)) != EOF && ch != '\n') {
+                if (hn + 1 < sizeof(hdr)) hdr[hn++] = (char)ch;
+            }
+            hdr[hn] = '\0';
+            const char *r = strstr(hdr, "rule");
+            if (r != NULL) {
+                r += 4;
+                while (*r == ' ' || *r == '\t' || *r == '=') r++;
+                size_t rl = strcspn(r, " \t\r,");
+                if ((rl >= 7 && strncasecmp(r + rl - 7, "History", 7) == 0) ||
+                    (rl >= 5 && strncasecmp(r + rl - 5, "Super", 5) == 0)) {
+                    odd_states_live = true;
+                }
+            }
             at_line_start = true;
             continue;
         }
@@ -102,17 +123,39 @@ bool rle_load(const char *path, int **cells, size_t *count,
         /* Reject rather than loop/overflow on an absurd run or pen position:
            a corrupt file must fail cleanly, never hang or wrap coordinates. */
         bool bad = n > RLE_RUN_MAX;
-        switch (ch) {
-            case 'b': case 'B': /* dead run */
-                if (bad || (long)cx + n > RLE_COORD_MAX) { c.count = 0; done = false; goto malformed; }
-                cx += (int)n;
-                break;
-            case 'o': case 'O': /* live run */
-                if (bad || (long)cx + n > RLE_COORD_MAX ||
-                    c.count + (size_t)n > RLE_CELLS_MAX) { c.count = 0; done = false; goto malformed; }
+
+        /* Cell tags, including Golly's multi-state RLE: 'b' and '.' are state
+           0, 'o' is state 1, 'A'..'X' are states 1..24, and a 'p'..'y' prefix
+           on a following 'A'..'X' encodes states 25..240. (Uppercase 'B'/'O'
+           are states 2/15 per Golly — live in every family, since LifeHistory's
+           even "was alive" markers are handled by odd_states_live above.) */
+        int state = -1; /* -1: not a cell tag */
+        if (ch == 'b' || ch == '.') {
+            state = 0;
+        } else if (ch == 'o') {
+            state = 1;
+        } else if (ch >= 'A' && ch <= 'X') {
+            state = 1 + (ch - 'A');
+        } else if (ch >= 'p' && ch <= 'y') {
+            int c2 = fgetc(f);
+            if (c2 >= 'A' && c2 <= 'X') {
+                state = (ch - 'p' + 1) * 24 + (c2 - 'A' + 1);
+            } else if (c2 != EOF) {
+                ungetc(c2, f); /* stray prefix letter: ignore the tag */
+            }
+        }
+
+        if (state >= 0) {
+            bool alive = odd_states_live ? (state % 2 == 1) : (state != 0);
+            if (bad || (long)cx + n > RLE_COORD_MAX ||
+                (alive && c.count + (size_t)n > RLE_CELLS_MAX)) {
+                c.count = 0; done = false; goto malformed;
+            }
+            if (alive) {
                 for (long i = 0; i < n; i++) cells_add(&c, cx + (int)i, cy);
-                cx += (int)n;
-                break;
+            }
+            cx += (int)n;
+        } else switch (ch) {
             case '$': /* end of line(s) */
                 if (bad || (long)cy + n > RLE_COORD_MAX) { c.count = 0; done = false; goto malformed; }
                 cy += (int)n;
