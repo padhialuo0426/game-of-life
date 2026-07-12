@@ -193,6 +193,21 @@ GOL_KITTY=1 game-of-life   # 强制使用 KGP(=0 禁用)
 GOL_SIXEL=1 game-of-life   # 强制认定支持 Sixel(=0 禁用)
 ```
 
+## 引擎后端
+
+默认使用**稀疏哈希集**引擎（交互编辑、小型/混沌图案表现最佳）。设置
+`GOL_HASHLIFE=1` 可切换到 **Hashlife**（Gosper 哈希四叉树）后端：
+
+```sh
+GOL_HASHLIFE=1 game-of-life -f saves/glider-gun.rle
+```
+
+Hashlife 把跳转（`j`）折叠成一系列 2 的幂次的记忆化跃迁，在结构化/周期性
+图案上远期快进近乎瞬时——例如让一个滑翔机前进十亿代只需约 0.3 毫秒（稀疏
+引擎需要逐代计算，不可行）。代价：在混沌/噪声图案上节点哈希表会增长，v1
+尚无垃圾回收，达到内存上限时会停止跳转并提示；此类交互场景仍建议用默认的
+稀疏引擎。坐标范围与稀疏引擎一致（±2³⁰）。
+
 ## 设置持久化
 
 参数以 JSON 记在 `$XDG_CONFIG_HOME/game-of-life/settings.json`

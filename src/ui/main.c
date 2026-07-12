@@ -1744,11 +1744,57 @@ static long millis_since(const struct timespec *t0) {
    generation and only touching the terminal every JUMP_SERVICE_MS gives bounded
    quit latency at both extremes. */
 #define JUMP_SERVICE_MS 40
+
+/* Cap on a single Hashlife leap so input is still serviced often enough (a leap
+   is not interruptible mid-call; only between calls). 2^24 generations per leap
+   keeps the worst-case pause bounded while still collapsing huge jumps into a
+   handful of memoised calls. */
+#define JUMP_LEAP_CAP (1L << 24)
+
+/* Drive a leaping backend (Hashlife): advance by the largest power-of-two chunk
+   (capped) each iteration so the O(log n) leap is actually used, servicing input
+   on the same wall-clock interval. History is not recorded per generation here —
+   a leaping backend replays a rewind from an earlier base just as cheaply, and
+   the history ring only accepts consecutive generations anyway. */
+static void run_forward_leap(App *app, long target, struct timespec *last) {
+    while (app->gen < target && app->running) {
+        long remaining = target - app->gen;
+        long chunk = 1;
+        while ((chunk << 1) <= remaining && (chunk << 1) <= JUMP_LEAP_CAP) chunk <<= 1;
+        engine_advance(app->engine, chunk);
+        if (engine_exhausted(app->engine)) {
+            /* The backend could not grow far enough (node-memory cap or the
+               +/-2^30 coordinate range). The leap did not apply, so the world is
+               still at app->gen; stop the jump there. */
+            popup_show(&app->popup, "Hashlife limit reached — jump stopped");
+            return;
+        }
+        app->gen += chunk;
+        if (millis_since(last) >= JUMP_SERVICE_MS) {
+            for (;;) {
+                Key k = terminal_read_key(0);
+                if (k == KEY_NONE) break;
+                if (k == KEY_QUIT) { app->running = false; return; } /* q / Ctrl-C */
+                if (k == KEY_ESC) return; /* abort the jump, stay in the app */
+            }
+            if (!app->running) return;
+            if (app->follow) recenter_camera(app);
+            render(app);
+            clock_gettime(CLOCK_MONOTONIC, last);
+        }
+    }
+}
+
 static void run_forward(App *app, long target) {
     app->jumping = true;
     app->jump_target = target;
     struct timespec last;
     clock_gettime(CLOCK_MONOTONIC, &last);
+    if (engine_leaps(app->engine)) {
+        run_forward_leap(app, target, &last);
+        app->jumping = false;
+        return;
+    }
     while (app->gen < target && app->running) {
         engine_advance(app->engine, 1);
         app->gen++;

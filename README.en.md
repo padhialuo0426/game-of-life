@@ -235,6 +235,25 @@ GOL_KITTY=1 game-of-life   # force KGP on (=0 disables it)
 GOL_SIXEL=1 game-of-life   # force sixel on (=0 disables it)
 ```
 
+## Engine backend
+
+The default is the **sparse hash-set** engine (best for interactive editing and
+small / chaotic patterns). Set `GOL_HASHLIFE=1` to switch to the **Hashlife**
+(Gosper hashed-quadtree) backend:
+
+```sh
+GOL_HASHLIFE=1 game-of-life -f saves/glider-gun.rle
+```
+
+Hashlife collapses a jump (`j`) into a series of memoised power-of-two leaps, so
+far-forward jumps on structured / repetitive patterns are near-instant — e.g.
+advancing a glider one billion generations takes ~0.3 ms (the sparse engine
+would have to compute every generation, which is intractable). The trade-off:
+on chaotic / noisy patterns the node hash table grows, and v1 has no garbage
+collection, so on hitting a memory cap it stops the jump with a notice — for
+those interactive cases the default sparse engine is still the better choice.
+The coordinate range matches the sparse engine (±2³⁰).
+
 ## Settings persistence
 
 Parameters are remembered in `$XDG_CONFIG_HOME/game-of-life/settings.json`

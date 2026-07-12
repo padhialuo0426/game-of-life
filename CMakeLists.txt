@@ -35,6 +35,7 @@ endif()
 add_executable(game-of-life
     src/core/board.c
     src/core/engine.c
+    src/core/hashlife.c
     src/core/history.c
     src/core/sparse.c
     src/io/config.c

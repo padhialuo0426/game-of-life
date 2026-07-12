@@ -26,6 +26,18 @@ void engine_free(LifeEngine *e);
    O(log n) using its 2^k step-doubling. */
 void engine_advance(LifeEngine *e, long n);
 
+/* True if the active backend leaps (Hashlife) rather than stepping one
+   generation at a time (sparse). The jump loop uses this to drive a leaping
+   backend by large power-of-two chunks instead of the single-step loop that
+   would waste all of Hashlife's speed-up. */
+bool engine_leaps(const LifeEngine *e);
+
+/* True if the last engine_advance could not complete because the backend hit
+   its memory cap (Hashlife without GC). Always false for the sparse backend.
+   A power-of-two leap is all-or-nothing, so on true the world is at a valid
+   earlier generation and the caller should stop advancing. */
+bool engine_exhausted(const LifeEngine *e);
+
 /* State access — used by rendering, editing and stats. */
 size_t engine_population(const LifeEngine *e);
 bool engine_get(const LifeEngine *e, int x, int y);
